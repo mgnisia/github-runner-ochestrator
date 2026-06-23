@@ -1,3 +1,10 @@
+*.js
+!jest.config.js
+*.d.ts
+node_modules
+# CDK asset staging / output
+.cdk.staging
+cdk.out
 
 # Beads / Dolt files (added by bd init)
 .dolt/
