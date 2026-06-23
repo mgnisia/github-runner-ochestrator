@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "github_runner_ochestrator",
+  "project_id": "82421361-e73b-43ca-b70b-c465226730a6"
+}
