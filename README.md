@@ -77,5 +77,73 @@ npm run synth
 ## Architecture
 
 - **API Gateway v2 (HTTP API)**: Accepts `POST /webhook` from GitHub.
-- **Lambda (Orchestrator)**: Loads the HMAC secret from SSM at cold start, verifies the `X-Hub-Signature-256` header, and logs the payload. Returns `202 Accepted` on valid signatures, `401` on invalid/missing, and `500` if the secret cannot be loaded.
-- **SSM SecureString**: Holds the shared webhook secret. Referenced (not created) by the stack.
+- **Lambda (Orchestrator)**: Loads the HMAC secret from SSM at cold start, verifies the `X-Hub-Signature-256` header, filters `workflow_job` events for `action == "queued"` and the `lambda-microvms` label, retrieves JIT runner credentials from GitHub, logs `encoded_jit_config`, and returns `202`. Non-matching events return `200 ignored`. Invalid/missing signature returns `401`. SSM load failure returns `500`.
+- **SSM SecureString (webhook secret)**: Holds the shared webhook secret. Referenced (not created) by the stack.
+- **SSM SecureString (app credentials)**: Holds the GitHub App credentials as a JSON object. Referenced (not created) by the stack.
+
+---
+
+## Phase 2: Event filtering and JIT runner credential retrieval
+
+### GitHub App credentials parameter
+
+The orchestrator reads GitHub App credentials from a second SSM SecureString at
+`/github-runner-orchestrator/app-credentials` (default). The value must be a JSON object:
+
+```json
+{
+  "appClientId": "Iv1.abc123",
+  "installationId": "12345678",
+  "privateKey": "-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----\n"
+}
+```
+
+The PEM newlines must be JSON-escaped as `\n`. A safe way to create this parameter from a key file:
+
+```bash
+PRIVATE_KEY=$(jq -Rs . < /path/to/private-key.pem)
+aws ssm put-parameter \
+  --name /github-runner-orchestrator/app-credentials \
+  --type SecureString \
+  --value "{\"appClientId\":\"Iv1.abc123\",\"installationId\":\"12345678\",\"privateKey\":${PRIVATE_KEY}}"
+```
+
+### CDK context overrides
+
+| Context key               | Default                                          | Description                             |
+|---------------------------|--------------------------------------------------|-----------------------------------------|
+| `appCredentialsParamName` | `/github-runner-orchestrator/app-credentials`    | SSM path to the GitHub App credentials  |
+| `runnerGroupId`           | `1`                                              | GitHub runner group ID                  |
+| `requiredRunnerLabel`     | `lambda-microvms`                                | Label a job must carry to trigger a JIT runner |
+
+Example:
+```bash
+npx cdk deploy \
+  -c appCredentialsParamName=/my/app-creds \
+  -c runnerGroupId=2 \
+  -c requiredRunnerLabel=lambda-microvms
+```
+
+### Filtering behaviour
+
+The handler processes only `workflow_job` webhooks where:
+- `action == "queued"` **and**
+- `workflow_job.labels` contains the required label (default: `lambda-microvms`).
+
+All other events (wrong type, wrong action, missing label) are logged with a clear reason and
+acknowledged with `200 ignored` — no runner work is performed.
+
+### Stack outputs (Phase 2)
+
+After deployment, the stack outputs three values:
+- **WebhookUrl**: The `POST /webhook` endpoint URL to configure in GitHub.
+- **WebhookSecretParamName**: The SSM parameter name holding the shared HMAC secret.
+- **AppCredentialsParamName**: The SSM parameter name holding the GitHub App credentials.
+
+---
+
+> **SECURITY — `encoded_jit_config` logging:** The JIT runner registration credential
+> (`encoded_jit_config`) is currently logged to CloudWatch **only** for the Phase 2 confirmation
+> phase. This logging **must be removed before this stack is used in production**. Removal is
+> tracked in beads issue `github-runner-ochestrator-q1h`. The App private key and installation
+> token are never logged.
