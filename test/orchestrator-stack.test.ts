@@ -15,16 +15,18 @@ test('synthesizes the webhook receiver infrastructure', () => {
   template.hasResourceProperties('AWS::ApiGatewayV2::Route', { RouteKey: 'POST /webhook' });
   template.hasResourceProperties('AWS::ApiGatewayV2::Integration', { IntegrationType: 'AWS_PROXY' });
 
-  // Orchestrator env var carries the parameter name (objectLike tolerates CDK-injected vars).
+  // Orchestrator env vars carry the parameter names and configuration (objectLike tolerates CDK-injected vars).
   template.hasResourceProperties('AWS::Lambda::Function', {
     Environment: {
       Variables: Match.objectLike({
-        WEBHOOK_SECRET_PARAM: '/github-runner-orchestrator/webhook-secret'
+        WEBHOOK_SECRET_PARAM: '/github-runner-orchestrator/webhook-secret',
+        GITHUB_APP_CREDENTIALS_PARAM: '/github-runner-orchestrator/app-credentials',
+        REQUIRED_RUNNER_LABEL: 'lambda-microvms'
       })
     }
   });
 
-  // IAM policy grants read on the SSM parameter (grantRead emits multiple ssm:GetParameter* actions).
+  // IAM policy grants read on the SSM parameters (grantRead emits multiple ssm:GetParameter* actions).
   template.hasResourceProperties('AWS::IAM::Policy', {
     PolicyDocument: {
       Statement: Match.arrayWith([
@@ -33,5 +35,10 @@ test('synthesizes the webhook receiver infrastructure', () => {
         })
       ])
     }
+  });
+
+  // AppCredentialsParamName output is present.
+  template.hasOutput('AppCredentialsParamName', {
+    Value: '/github-runner-orchestrator/app-credentials'
   });
 });
