@@ -12,6 +12,6 @@
     "forceConsistentCasingInFileNames": true,
     "types": ["node", "jest"]
   },
-  "include": ["bin", "lib", "src", "test"],
+  "include": ["bin", "lib", "scripts", "src", "test"],
   "exclude": ["node_modules", "cdk.out"]
 }
