@@ -52,12 +52,13 @@ bd close <id>         # Complete work
 
 ## Build & Test
 
-_Add your build and test commands here_
-
 ```bash
-# Example:
-# npm install
-# npm test
+npm install        # install dependencies
+npm run build      # type-check (tsc --noEmit)
+npm test           # run jest unit tests
+npm run synth      # cdk synth
+npm run deploy     # cdk deploy --outputs-file output.json (infra first; orchestrator once MICROVM_IMAGE_ARN is set)
+npm run build:image  # zip+upload microvm/, create/update the MicroVM image, write MICROVM_IMAGE_ARN to .env
 ```
 
 ## Architecture Overview

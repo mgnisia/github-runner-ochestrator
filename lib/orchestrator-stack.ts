@@ -42,7 +42,7 @@ export class OrchestratorStack extends Stack {
     const codeBucket = new s3.Bucket(this, 'MicrovmCodeBucket');
 
     // ── Build role ─────────────────────────────────────────────────────────────
-    // Used by Lambda to pull the code artifact from S3 during MicrovmImage build.
+    // Used by Lambda to pull the code artifact from S3 during the script-driven MicroVM image build.
     const buildRole = new iam.Role(this, 'MicrovmBuildRole', {
       // TODO VERIFY AT DEPLOY: confirm the correct service principal for the MicroVM build service
       assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
