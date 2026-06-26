@@ -73,7 +73,6 @@ async function handleRequest(req, res) {
   if (method === 'POST' && url === '/aws/lambda-microvms/runtime/v1/run') {
     try {
       const body = await readBody(req);
-      console.log('Got body:', body);
       const { microvmId, runHookPayload } = JSON.parse(body);
       const encodedJitConfig = decodeJitConfig(runHookPayload);
 
