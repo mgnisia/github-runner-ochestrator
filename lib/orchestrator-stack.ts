@@ -1,6 +1,6 @@
 import * as path from 'node:path';
 import { spawnSync } from 'child_process';
-import { Stack, StackProps, CfnOutput, DockerImage } from 'aws-cdk-lib';
+import { Stack, StackProps, CfnOutput, DockerImage, AssetHashType, BundlingOutput } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as s3 from 'aws-cdk-lib/aws-s3';
@@ -56,14 +56,34 @@ export class OrchestratorStack extends Stack {
     new s3deploy.BucketDeployment(this, 'MicrovmCodeDeployment', {
       sources: [
         s3deploy.Source.asset(microvmDir, {
+          // Hash the bundling OUTPUT (the produced app.zip), not the source dir, so the asset
+          // fingerprint tracks what is actually deployed.
+          assetHashType: AssetHashType.OUTPUT,
           bundling: {
+            // NOT_ARCHIVED is essential: the bundler emits a single `app.zip` file into the output
+            // dir. Under the default AUTO_DISCOVER, CDK would treat that lone archive AS the asset's
+            // transport zip — so extract:true would unpack it into the four loose source files and
+            // there would be no `app.zip` object at all. Forcing NOT_ARCHIVED makes CDK zip the
+            // output *directory* (which contains `app.zip`); extract:true then deposits the file at
+            // the deterministic key `app.zip` that CodeArtifact.Uri references below.
+            outputType: BundlingOutput.NOT_ARCHIVED,
             // Docker fallback — only used if local bundling returns false.
             image: DockerImage.fromRegistry('alpine'),
             local: {
               tryBundle(outputDir: string): boolean {
+                // Produce app.zip containing exactly the four runtime files (explicit list,
+                // matching the experiment's deploy.sh) so no stray files (e.g. macOS .DS_Store)
+                // or a self-referential app.zip can leak into the archive.
                 const result = spawnSync(
                   'zip',
-                  ['-r', path.join(outputDir, 'app.zip'), '.'],
+                  [
+                    '-r',
+                    path.join(outputDir, 'app.zip'),
+                    'Dockerfile',
+                    'app.js',
+                    'entrypoint.sh',
+                    'package.json',
+                  ],
                   { cwd: microvmDir, stdio: 'inherit' }
                 );
                 return result.status === 0;
@@ -74,8 +94,11 @@ export class OrchestratorStack extends Stack {
       ],
       destinationBucket: codeBucket,
       destinationKeyPrefix: '',
-      // Upload the zip as-is (object key `app.zip`) rather than extracting its contents.
-      extract: false,
+      // extract: true — paired with BundlingOutput.NOT_ARCHIVED above, CDK transports the output
+      // *directory* (containing `app.zip`) and extracts it into the bucket root, leaving exactly one
+      // object at the deterministic key `app.zip` that CodeArtifact.Uri references below. With
+      // extract:false the object would instead land under an unpredictable `<hash>.zip` key.
+      extract: true,
     });
 
     const codeArtifactUri = codeBucket.s3UrlForObject('app.zip');

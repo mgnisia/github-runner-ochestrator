@@ -47,9 +47,10 @@ test('synthesizes the webhook receiver infrastructure', () => {
     Value: '/github-runner-orchestrator/app-credentials'
   });
 
-  // MicroVM image resource is declared in the template.
+  // MicroVM image resource is declared in the template with the expected name and ARM64 CPU config.
   template.hasResourceProperties('AWS::Lambda::MicrovmImage', {
     Name: 'github-runner',
+    CpuConfigurations: [{ Architecture: 'ARM_64' }],
   });
 
   // S3 bucket for MicroVM code artifact — only 1 CloudFormation bucket;

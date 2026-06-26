@@ -155,7 +155,7 @@ The `microvm/` directory contains the source files that are zipped into `app.zip
 | `entrypoint.sh` | Shell script that passes `ENCODED_JIT_CONFIG` to `run.sh --jitconfig` |
 | `package.json` | NPM manifest declaring `@aws-sdk/client-lambda-microvms` as the sole runtime dependency |
 
-At synth time, CDK runs `zip -r app.zip .` (via local bundling) in the `microvm/` directory and uploads the resulting archive to the MicroVM code S3 bucket.
+At synth time, CDK zips exactly these four files into `app.zip` (via local bundling) in the `microvm/` directory and deploys it (extracted to the deterministic object key `app.zip`) into the MicroVM code S3 bucket.
 
 ### MicroVM code S3 bucket
 
