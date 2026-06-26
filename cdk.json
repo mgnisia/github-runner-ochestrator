@@ -12,10 +12,6 @@
     ]
   },
   "context": {
-    "runnerGroupId": "3",
-    "microvmImageIdentifier": "arn:aws:lambda:eu-west-1:739178438747:microvm-image:github-runner",
-    "microvmExecutionRoleArn": "arn:aws:iam::739178438747:role/MicroVMExecutionRole",
-    "microvmIngressNetworkConnectors": "arn:aws:lambda:eu-west-1:aws:network-connector:aws-network-connector:NO_INGRESS",
-    "microvmEgressNetworkConnectors": "arn:aws:lambda:eu-west-1:aws:network-connector:aws-network-connector:INTERNET_EGRESS"
+    "runnerGroupId": "3"
   }
 }

@@ -2,20 +2,18 @@ import { App } from 'aws-cdk-lib';
 import { Template, Match } from 'aws-cdk-lib/assertions';
 import { OrchestratorStack } from '../lib/orchestrator-stack';
 
+beforeAll(() => {
+  process.env.MICROVM_BASE_IMAGE_ARN = 'arn:aws:lambda:eu-west-1:123456789012:microvm-base-image:al2023';
+  process.env.MICROVM_BASE_IMAGE_VERSION = '1';
+});
+
 test('synthesizes the webhook receiver infrastructure', () => {
-  const app = new App({
-    context: {
-      microvmImageIdentifier: 'arn:aws:lambda:eu-west-1:123456789012:microvm-image:test',
-      microvmExecutionRoleArn: 'arn:aws:iam::123456789012:role/MicroVMExecutionRole',
-      microvmIngressNetworkConnectors: 'arn:aws:lambda:eu-west-1:aws:network-connector:aws-network-connector:NO_INGRESS',
-      microvmEgressNetworkConnectors: 'arn:aws:lambda:eu-west-1:aws:network-connector:aws-network-connector:INTERNET_EGRESS',
-    },
-  });
+  const app = new App();
   const stack = new OrchestratorStack(app, 'TestStack');
   const template = Template.fromStack(stack);
 
-  // Exactly one Lambda (the orchestrator) — no custom resource, no log-retention Lambda.
-  template.resourceCountIs('AWS::Lambda::Function', 1);
+  // Orchestrator Lambda + BucketDeployment custom resource Lambda
+  template.resourceCountIs('AWS::Lambda::Function', 2);
 
   // HTTP API + POST /webhook route + Lambda proxy integration.
   template.hasResourceProperties('AWS::ApiGatewayV2::Api', { ProtocolType: 'HTTP' });
@@ -47,5 +45,40 @@ test('synthesizes the webhook receiver infrastructure', () => {
   // AppCredentialsParamName output is present.
   template.hasOutput('AppCredentialsParamName', {
     Value: '/github-runner-orchestrator/app-credentials'
+  });
+
+  // MicroVM image resource is declared in the template.
+  template.hasResourceProperties('AWS::Lambda::MicrovmImage', {
+    Name: 'github-runner',
+  });
+
+  // S3 bucket for MicroVM code artifact — only 1 CloudFormation bucket;
+  // BucketDeployment stages assets in the CDK bootstrap bucket, not a separate CFN resource.
+  template.resourceCountIs('AWS::S3::Bucket', 1);
+
+  // Build role has S3 read permission for the code artifact.
+  template.hasResourceProperties('AWS::IAM::Role', {
+    Policies: Match.arrayWith([
+      Match.objectLike({
+        PolicyDocument: Match.objectLike({
+          Statement: Match.arrayWith([
+            Match.objectLike({ Action: 's3:GetObject' })
+          ])
+        })
+      })
+    ])
+  });
+
+  // Execution role has TerminateMicrovm permission.
+  template.hasResourceProperties('AWS::IAM::Role', {
+    Policies: Match.arrayWith([
+      Match.objectLike({
+        PolicyDocument: Match.objectLike({
+          Statement: Match.arrayWith([
+            Match.objectLike({ Action: 'lambda:TerminateMicrovm' })
+          ])
+        })
+      })
+    ])
   });
 });

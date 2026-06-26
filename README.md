@@ -142,6 +142,79 @@ After deployment, the stack outputs three values:
 
 ---
 
+## Phase 2.5: MicroVM image encapsulation in CDK
+
+### MicroVM runtime source (`microvm/`)
+
+The `microvm/` directory contains the source files that are zipped into `app.zip` and uploaded to S3 at deploy time:
+
+| File | Description |
+|---|---|
+| `Dockerfile` | Ubuntu 24.04-based image with Node.js 22, the GitHub Actions runner, and a Python tool cache |
+| `app.js` | Lifecycle hook server — handles `/ready`, `/run`, and `/terminate` hooks on ports 8080 and 9000 |
+| `entrypoint.sh` | Shell script that passes `ENCODED_JIT_CONFIG` to `run.sh --jitconfig` |
+| `package.json` | NPM manifest declaring `@aws-sdk/client-lambda-microvms` as the sole runtime dependency |
+
+At synth time, CDK runs `zip -r app.zip .` (via local bundling) in the `microvm/` directory and uploads the resulting archive to the MicroVM code S3 bucket.
+
+### MicroVM code S3 bucket
+
+A dedicated `AWS::S3::Bucket` (`MicrovmCodeBucket`) holds `app.zip`. Its removal policy is the CDK default (RETAIN), so it persists after stack deletion. The bucket name is emitted as the `MicrovmCodeBucketName` stack output.
+
+### IAM roles
+
+Two IAM roles are created and managed by the CDK stack:
+
+**MicrovmBuildRole** — assumed by Lambda during the `AWS::Lambda::MicrovmImage` build phase:
+- `s3:GetObject` on the code bucket (to pull `app.zip`)
+- `logs:CreateLogGroup/CreateLogStream/PutLogEvents` on `*`
+
+**MicrovmExecutionRole** — assumed by each MicroVM instance at runtime:
+- `lambda:TerminateMicrovm` on `*` (so `app.js` can self-terminate after the runner exits)
+- `logs:CreateLogGroup/CreateLogStream/PutLogEvents` on `*`
+
+### L1 MicrovmImage construct (`lib/microvm-image.ts`)
+
+`MicrovmImage` wraps the `AWS::Lambda::MicrovmImage` CloudFormation resource type. It accepts:
+
+| Prop | Description |
+|---|---|
+| `buildRoleArn` | ARN of the build role |
+| `codeArtifactUri` | `s3://bucket/app.zip` URI |
+| `baseImageArn` | ARN of the base MicroVM image (from `MICROVM_BASE_IMAGE_ARN`) |
+| `baseImageVersion` | Version string for the base image (from `MICROVM_BASE_IMAGE_VERSION`) |
+| `egressConnectorArn` | Region/partition-derived egress network connector ARN |
+
+It exposes `imageArn` (resolved from `Fn::GetAtt`) which is wired into the orchestrator Lambda's environment and IAM policies.
+
+### Required environment variables
+
+These must be set before running `cdk synth` or `cdk deploy`:
+
+| Variable | Description | Example |
+|---|---|---|
+| `MICROVM_BASE_IMAGE_ARN` | ARN of the AWS-provided MicroVM base image | `arn:aws:lambda:eu-west-1:739178438747:microvm-base-image:al2023` |
+| `MICROVM_BASE_IMAGE_VERSION` | Version of the base image | `1` |
+
+```bash
+export MICROVM_BASE_IMAGE_ARN=arn:aws:lambda:eu-west-1:739178438747:microvm-base-image:al2023
+export MICROVM_BASE_IMAGE_VERSION=1
+npx cdk synth
+```
+
+If either variable is unset, `cdk synth` fails immediately with a clear error message.
+
+### Network connectors
+
+Ingress and egress network connector ARNs are derived from the stack's region and partition at synth time — no CDK context overrides are needed:
+
+```
+arn:{partition}:lambda:{region}:aws:network-connector:aws-network-connector:NO_INGRESS
+arn:{partition}:lambda:{region}:aws:network-connector:aws-network-connector:INTERNET_EGRESS
+```
+
+---
+
 > **SECURITY — `encoded_jit_config` logging:** The JIT runner registration credential
 > (`encoded_jit_config`) is currently logged to CloudWatch **only** for the Phase 2 confirmation
 > phase. This logging **must be removed before this stack is used in production**. Removal is

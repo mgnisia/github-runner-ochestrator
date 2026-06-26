@@ -1,0 +1,7 @@
+{
+  "name": "github-runner-microvm",
+  "private": true,
+  "dependencies": {
+    "@aws-sdk/client-lambda-microvms": "^3.1074.0"
+  }
+}
