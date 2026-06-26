@@ -11,7 +11,5 @@
       "test"
     ]
   },
-  "context": {
-    "runnerGroupId": "3"
-  }
+  "context": {}
 }

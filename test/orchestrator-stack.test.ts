@@ -5,6 +5,7 @@ import { OrchestratorStack } from '../lib/orchestrator-stack';
 beforeAll(() => {
   process.env.MICROVM_BASE_IMAGE_ARN = 'arn:aws:lambda:eu-west-1:123456789012:microvm-base-image:al2023';
   process.env.MICROVM_BASE_IMAGE_VERSION = '1';
+  process.env.RUNNER_GROUP_ID = '42';
 });
 
 test('synthesizes the webhook receiver infrastructure', () => {
@@ -26,7 +27,8 @@ test('synthesizes the webhook receiver infrastructure', () => {
       Variables: Match.objectLike({
         WEBHOOK_SECRET_PARAM: '/github-runner-orchestrator/webhook-secret',
         GITHUB_APP_CREDENTIALS_PARAM: '/github-runner-orchestrator/app-credentials',
-        REQUIRED_RUNNER_LABEL: 'lambda-microvms'
+        REQUIRED_RUNNER_LABEL: 'lambda-microvms',
+        RUNNER_GROUP_ID: '42',
       })
     }
   });

@@ -113,14 +113,14 @@ aws ssm put-parameter \
 | Context key               | Default                                          | Description                             |
 |---------------------------|--------------------------------------------------|-----------------------------------------|
 | `appCredentialsParamName` | `/github-runner-orchestrator/app-credentials`    | SSM path to the GitHub App credentials  |
-| `runnerGroupId`           | `1`                                              | GitHub runner group ID                  |
 | `requiredRunnerLabel`     | `lambda-microvms`                                | Label a job must carry to trigger a JIT runner |
+
+`cdk.json` no longer carries any per-deployment configuration — all deployment-specific values are supplied via environment variables (see the "Required environment variables" section below).
 
 Example:
 ```bash
 npx cdk deploy \
   -c appCredentialsParamName=/my/app-creds \
-  -c runnerGroupId=2 \
   -c requiredRunnerLabel=lambda-microvms
 ```
 
@@ -195,14 +195,16 @@ These must be set before running `cdk synth` or `cdk deploy`:
 |---|---|---|
 | `MICROVM_BASE_IMAGE_ARN` | ARN of the AWS-provided MicroVM base image | `arn:aws:lambda:eu-west-1:739178438747:microvm-base-image:al2023` |
 | `MICROVM_BASE_IMAGE_VERSION` | Version of the base image | `1` |
+| `RUNNER_GROUP_ID` | GitHub runner group ID the JIT runner registers into | `1` |
 
 ```bash
 export MICROVM_BASE_IMAGE_ARN=arn:aws:lambda:eu-west-1:739178438747:microvm-base-image:al2023
 export MICROVM_BASE_IMAGE_VERSION=1
+export RUNNER_GROUP_ID=1
 npx cdk synth
 ```
 
-If either variable is unset, `cdk synth` fails immediately with a clear error message.
+If any variable is unset, `cdk synth` fails immediately with a clear error message naming the missing variable.
 
 ### Network connectors
 

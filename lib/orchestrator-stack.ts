@@ -28,7 +28,7 @@ export class OrchestratorStack extends Stack {
       (this.node.tryGetContext('appCredentialsParamName') as string | undefined) ??
       DEFAULT_APP_CREDS_PARAM;
 
-    const runnerGroupId = String(this.node.tryGetContext('runnerGroupId') ?? '1');
+    const runnerGroupId = requireEnv('RUNNER_GROUP_ID');
 
     const requiredRunnerLabel =
       (this.node.tryGetContext('requiredRunnerLabel') as string | undefined) ?? 'lambda-microvms';
