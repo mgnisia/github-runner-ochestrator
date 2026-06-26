@@ -12,7 +12,8 @@
     "@aws-sdk/client-lambda-microvms": "^3.1075.0",
     "@aws-sdk/client-ssm": ">=3.1074.0",
     "aws-cdk-lib": "^2",
-    "constructs": "^10"
+    "constructs": "^10",
+    "dotenv": "^16"
   },
   "devDependencies": {
     "@types/aws-lambda": "^8",
