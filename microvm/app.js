@@ -1,0 +1,127 @@
+// Lambda MicroVM lifecycle hook server — listens on port 8080 (catch-all) and 9000 (all hooks)
+const http = require('http');
+const { spawn } = require('child_process');
+const zlib = require('zlib');
+const { LambdaMicrovmsClient, TerminateMicrovmCommand } = require('@aws-sdk/client-lambda-microvms');
+
+// Stored in module scope after the /run hook fires — used only for logging
+let runnerName = null;
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on('data', chunk => chunks.push(chunk));
+    req.on('end', () => resolve(Buffer.concat(chunks).toString()));
+    req.on('error', reject);
+  });
+}
+
+function runnerNameFromJitConfig(encodedJitConfig) {
+  const outer = JSON.parse(Buffer.from(encodedJitConfig, 'base64').toString('utf8'));
+  const runner = JSON.parse(Buffer.from(outer['.runner'], 'base64').toString('utf8'));
+  return runner.AgentName;
+}
+
+// Accepts the raw run-hook payload, which is either:
+//   (a) the plain encoded_jit_config (a base64 string), or
+//   (b) base64(gzip(encoded_jit_config)) — produced by: echo -n "$JIT_CONFIG" | gzip | base64
+// Detects the gzip magic bytes (0x1f 0x8b) after the outer base64 decode and decompresses if
+// present. Node's Buffer.from(…, 'base64') silently strips embedded newlines, so macOS base64
+// line-wrapped output is handled automatically.
+function decodeJitConfig(payload) {
+  const buf = Buffer.from(payload, 'base64');
+  if (buf[0] === 0x1f && buf[1] === 0x8b) {
+    return zlib.gunzipSync(buf).toString('utf8');
+  }
+  return payload;
+}
+
+// Calls TerminateMicrovm via the AWS JS SDK so the VM stops promptly after the runner exits.
+// If microvmId is missing (e.g. local dev / incomplete payload), logs a warning and skips.
+// Errors are caught and logged — a failed terminate is not fatal; the idle policy is the fallback.
+async function terminateSelf(microvmId) {
+  if (!microvmId) {
+    console.warn('Warning: microvmId is missing — skipping self-termination');
+    return;
+  }
+  const region = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || 'eu-west-1';
+  const client = new LambdaMicrovmsClient({ region });
+  try {
+    await client.send(new TerminateMicrovmCommand({ microvmIdentifier: microvmId }));
+    console.log('TerminateMicrovm succeeded for:', microvmId);
+  } catch (err) {
+    console.error('TerminateMicrovm failed for:', microvmId, err);
+  }
+}
+
+async function handleRequest(req, res) {
+  const { method, url } = req;
+  console.log(`${new Date().toISOString()} ${method} ${url}`);
+
+  // POST /aws/lambda-microvms/runtime/v1/ready
+  // Required during image creation so Lambda knows the server is up.
+  if (method === 'POST' && url === '/aws/lambda-microvms/runtime/v1/ready') {
+    res.writeHead(200);
+    res.end();
+    return;
+  }
+
+  // POST /aws/lambda-microvms/runtime/v1/run
+  // Receives per-instance JIT config, derives the runner name, and spawns entrypoint.sh.
+  // Termination is handled here: when the child exits (regardless of exit code or signal),
+  // terminateSelf() is called so the VM stops promptly without relying on the AWS CLI.
+  if (method === 'POST' && url === '/aws/lambda-microvms/runtime/v1/run') {
+    try {
+      const body = await readBody(req);
+      console.log('Got body:', body);
+      const { microvmId, runHookPayload } = JSON.parse(body);
+      const encodedJitConfig = decodeJitConfig(runHookPayload);
+
+      runnerName = runnerNameFromJitConfig(encodedJitConfig);
+      console.log('MicroVM ID:', microvmId ?? '(unknown)');
+      console.log('Runner name from JIT config:', runnerName);
+
+      const child = spawn('./entrypoint.sh', [], {
+        stdio: 'inherit',
+        env: { ...process.env, ENCODED_JIT_CONFIG: encodedJitConfig },
+      });
+
+      // Attach the exit listener before returning 200 — this is synchronous and non-blocking.
+      // terminateSelf fires regardless of exit code/signal so the VM is torn down even on failure.
+      child.on('exit', (code, signal) => {
+        console.log(`Runner process exited — code: ${code ?? '(null)'}, signal: ${signal ?? '(null)'}`);
+        terminateSelf(microvmId);
+      });
+
+      res.writeHead(200);
+      res.end();
+    } catch (err) {
+      console.error('Error handling /run:', err);
+      res.writeHead(500);
+      res.end();
+    }
+    return;
+  }
+
+  // POST /aws/lambda-microvms/runtime/v1/terminate
+  // Fired by Lambda after app.js itself called TerminateMicrovm on child exit. The JIT runner
+  // has already auto-deregistered from GitHub at this point, so there is nothing to clean up;
+  // we just ack.
+  if (method === 'POST' && url === '/aws/lambda-microvms/runtime/v1/terminate') {
+    console.log('Terminate received for runner:', runnerName ?? '(unknown)');
+    res.writeHead(200);
+    res.end();
+    return;
+  }
+
+  // Catch-all — useful for debugging unexpected requests
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ status: 'ok', path: url }));
+}
+
+// Both ports share the same handler: 8080 acts as the catch-all, 9000 receives all hooks.
+for (const port of [8080, 9000]) {
+  http.createServer(handleRequest).listen(port, '0.0.0.0', () => {
+    console.log(`Listening on 0.0.0.0:${port}`);
+  });
+}
