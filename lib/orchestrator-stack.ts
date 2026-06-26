@@ -33,9 +33,6 @@ export class OrchestratorStack extends Stack {
     const requiredRunnerLabel =
       (this.node.tryGetContext('requiredRunnerLabel') as string | undefined) ?? 'lambda-microvms';
 
-    const baseImageArn = requireEnv('MICROVM_BASE_IMAGE_ARN');
-    const baseImageVersion = requireEnv('MICROVM_BASE_IMAGE_VERSION');
-
     const microvmMaxIdleSeconds =
       (this.node.tryGetContext('microvmMaxIdleSeconds') as string | undefined) ?? '900';
     const microvmSuspendedSeconds =
@@ -46,6 +43,11 @@ export class OrchestratorStack extends Stack {
     // Network connector ARNs derived from stack region/partition — no context overrides needed.
     const ingressConnectorArn = `arn:${this.partition}:lambda:${this.region}:aws:network-connector:aws-network-connector:NO_INGRESS`;
     const egressConnectorArn = `arn:${this.partition}:lambda:${this.region}:aws:network-connector:aws-network-connector:INTERNET_EGRESS`;
+
+    // Base image ARN — AWS-owned image; account segment is the literal `aws`.
+    // Version is LATEST so new patch releases are picked up automatically.
+    const baseImageArn = `arn:${this.partition}:lambda:${this.region}:aws:microvm-image:al2023-1`;
+    const baseImageVersion = 'LATEST';
 
     // ── MicroVM code bucket ────────────────────────────────────────────────────
     // Default removal policy is RETAIN — no explicit removalPolicy needed.

@@ -181,11 +181,18 @@ Two IAM roles are created and managed by the CDK stack:
 |---|---|
 | `buildRoleArn` | ARN of the build role |
 | `codeArtifactUri` | `s3://bucket/app.zip` URI |
-| `baseImageArn` | ARN of the base MicroVM image (from `MICROVM_BASE_IMAGE_ARN`) |
-| `baseImageVersion` | Version string for the base image (from `MICROVM_BASE_IMAGE_VERSION`) |
+| `baseImageArn` | ARN of the base MicroVM image — hardcoded as `arn:{partition}:lambda:{region}:aws:microvm-image:al2023-1` |
+| `baseImageVersion` | Version string for the base image — hardcoded as `LATEST` |
 | `egressConnectorArn` | Region/partition-derived egress network connector ARN |
 
 It exposes `imageArn` (resolved from `Fn::GetAtt`) which is wired into the orchestrator Lambda's environment and IAM policies.
+
+### Base image
+
+The MicroVM base image is an AWS-owned image; its ARN and version are hardcoded in the stack and require no environment variable:
+
+- **BaseImageArn**: `arn:{partition}:lambda:{region}:aws:microvm-image:al2023-1` — derived from the stack's region and partition at synth time.
+- **BaseImageVersion**: `LATEST` — automatically picks up the latest patch release.
 
 ### Required environment variables
 
@@ -193,18 +200,14 @@ These must be set before running `cdk synth` or `cdk deploy`:
 
 | Variable | Description | Example |
 |---|---|---|
-| `MICROVM_BASE_IMAGE_ARN` | ARN of the AWS-provided MicroVM base image | `arn:aws:lambda:eu-west-1:739178438747:microvm-base-image:al2023` |
-| `MICROVM_BASE_IMAGE_VERSION` | Version of the base image | `1` |
 | `RUNNER_GROUP_ID` | GitHub runner group ID the JIT runner registers into | `1` |
 
 ```bash
-export MICROVM_BASE_IMAGE_ARN=arn:aws:lambda:eu-west-1:739178438747:microvm-base-image:al2023
-export MICROVM_BASE_IMAGE_VERSION=1
 export RUNNER_GROUP_ID=1
 npx cdk synth
 ```
 
-If any variable is unset, `cdk synth` fails immediately with a clear error message naming the missing variable.
+If the variable is unset, `cdk synth` fails immediately with a clear error message naming the missing variable.
 
 ### Network connectors
 

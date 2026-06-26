@@ -18,6 +18,8 @@ export class MicrovmImage extends Construct {
     // VERIFY AT DEPLOY: the exact accepted CodeArtifact.Uri form (zip object vs prefix)
     // and the minimal Hooks/Logging shape are unconfirmed for this brand-new service;
     // confirm on first deploy and adjust if CloudFormation rejects.
+    // BaseImageVersion is set to 'LATEST' — confirm this token is accepted by CloudFormation
+    // on first deploy; adjust to an explicit version string if rejected.
     const resource = new CfnResource(this, 'Resource', {
       type: 'AWS::Lambda::MicrovmImage',
       properties: {

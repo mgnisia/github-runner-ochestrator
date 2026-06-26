@@ -3,8 +3,6 @@ import { Template, Match } from 'aws-cdk-lib/assertions';
 import { OrchestratorStack } from '../lib/orchestrator-stack';
 
 beforeAll(() => {
-  process.env.MICROVM_BASE_IMAGE_ARN = 'arn:aws:lambda:eu-west-1:123456789012:microvm-base-image:al2023';
-  process.env.MICROVM_BASE_IMAGE_VERSION = '1';
   process.env.RUNNER_GROUP_ID = '42';
 });
 
@@ -49,10 +47,17 @@ test('synthesizes the webhook receiver infrastructure', () => {
     Value: '/github-runner-orchestrator/app-credentials'
   });
 
-  // MicroVM image resource is declared in the template with the expected name and ARM64 CPU config.
+  // MicroVM image resource is declared in the template with the expected name, ARM64 CPU config,
+  // hardcoded LATEST version, and the AWS-owned base image ARN (account segment is the literal `aws`).
+  // BaseImageArn is a Fn::Join because region/partition are CDK tokens — match the join array to
+  // verify the literal suffix without hardcoding a resolved region.
   template.hasResourceProperties('AWS::Lambda::MicrovmImage', {
     Name: 'github-runner',
     CpuConfigurations: [{ Architecture: 'ARM_64' }],
+    BaseImageVersion: 'LATEST',
+    BaseImageArn: {
+      'Fn::Join': ['', Match.arrayWith([':aws:microvm-image:al2023-1'])],
+    },
   });
 
   // S3 bucket for MicroVM code artifact — only 1 CloudFormation bucket;
