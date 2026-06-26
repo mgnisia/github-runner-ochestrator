@@ -10,7 +10,7 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import { HttpApi, HttpMethod } from 'aws-cdk-lib/aws-apigatewayv2';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
-import { requireContext, requireEnv } from './helpers';
+import { requireEnv } from './helpers';
 import { MicrovmImage } from './microvm-image';
 
 const DEFAULT_PARAM_NAME = '/github-runner-orchestrator/webhook-secret';
@@ -58,7 +58,7 @@ export class OrchestratorStack extends Stack {
         s3deploy.Source.asset(microvmDir, {
           bundling: {
             // Docker fallback — only used if local bundling returns false.
-            image: DockerImage.fromRegistry('public.ecr.aws/docker/library/node:22-alpine'),
+            image: DockerImage.fromRegistry('alpine'),
             local: {
               tryBundle(outputDir: string): boolean {
                 const result = spawnSync(
@@ -74,29 +74,25 @@ export class OrchestratorStack extends Stack {
       ],
       destinationBucket: codeBucket,
       destinationKeyPrefix: '',
+      // Upload the zip as-is (object key `app.zip`) rather than extracting its contents.
+      extract: false,
     });
 
-    const codeArtifactUri = `s3://${codeBucket.bucketName}/app.zip`;
+    const codeArtifactUri = codeBucket.s3UrlForObject('app.zip');
 
     // ── Build role ─────────────────────────────────────────────────────────────
     // Used by Lambda to pull the code artifact from S3 during MicrovmImage build.
     const buildRole = new iam.Role(this, 'MicrovmBuildRole', {
+      // TODO VERIFY AT DEPLOY: confirm the correct service principal for the MicroVM build service
       assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
-      inlinePolicies: {
-        CodeAccess: new iam.PolicyDocument({
-          statements: [
-            new iam.PolicyStatement({
-              actions: ['s3:GetObject'],
-              resources: [codeBucket.arnForObjects('*')],
-            }),
-            new iam.PolicyStatement({
-              actions: ['logs:CreateLogGroup', 'logs:CreateLogStream', 'logs:PutLogEvents'],
-              resources: ['*'],
-            }),
-          ],
-        }),
-      },
     });
+    codeBucket.grantRead(buildRole);
+    buildRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ['logs:CreateLogGroup', 'logs:CreateLogStream', 'logs:PutLogEvents'],
+        resources: [`arn:${this.partition}:logs:*:*:*`],
+      })
+    );
 
     // ── MicrovmImage L1 construct ──────────────────────────────────────────────
     const microvmImage = new MicrovmImage(this, 'MicrovmImage', {
@@ -110,22 +106,21 @@ export class OrchestratorStack extends Stack {
     // ── Execution role ─────────────────────────────────────────────────────────
     // Assumed by the MicroVM instance at runtime.
     const executionRole = new iam.Role(this, 'MicrovmExecutionRole', {
+      // TODO VERIFY AT DEPLOY: confirm the correct service principal for the MicroVM runtime
       assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
-      inlinePolicies: {
-        MicrovmExecution: new iam.PolicyDocument({
-          statements: [
-            new iam.PolicyStatement({
-              actions: ['lambda:TerminateMicrovm'],
-              resources: ['*'],
-            }),
-            new iam.PolicyStatement({
-              actions: ['logs:CreateLogGroup', 'logs:CreateLogStream', 'logs:PutLogEvents'],
-              resources: ['*'],
-            }),
-          ],
-        }),
-      },
     });
+    executionRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ['lambda:TerminateMicrovm'],
+        resources: [microvmImage.imageArn],
+      })
+    );
+    executionRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ['logs:CreateLogGroup', 'logs:CreateLogStream', 'logs:PutLogEvents'],
+        resources: ['*'],
+      })
+    );
 
     // ── SSM SecureString references ────────────────────────────────────────────
     // Reference (do NOT create) the existing SecureStrings. No `version` => value is never

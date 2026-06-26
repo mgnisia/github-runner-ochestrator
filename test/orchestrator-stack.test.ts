@@ -56,29 +56,21 @@ test('synthesizes the webhook receiver infrastructure', () => {
   // BucketDeployment stages assets in the CDK bootstrap bucket, not a separate CFN resource.
   template.resourceCountIs('AWS::S3::Bucket', 1);
 
-  // Build role has S3 read permission for the code artifact.
-  template.hasResourceProperties('AWS::IAM::Role', {
-    Policies: Match.arrayWith([
-      Match.objectLike({
-        PolicyDocument: Match.objectLike({
-          Statement: Match.arrayWith([
-            Match.objectLike({ Action: 's3:GetObject' })
-          ])
-        })
-      })
-    ])
+  // Build role has S3 read permission for the code artifact (granted via bucket.grantRead).
+  template.hasResourceProperties('AWS::IAM::Policy', {
+    PolicyDocument: Match.objectLike({
+      Statement: Match.arrayWith([
+        Match.objectLike({ Action: Match.arrayWith([Match.stringLikeRegexp('s3:GetObject')]) })
+      ])
+    })
   });
 
   // Execution role has TerminateMicrovm permission.
-  template.hasResourceProperties('AWS::IAM::Role', {
-    Policies: Match.arrayWith([
-      Match.objectLike({
-        PolicyDocument: Match.objectLike({
-          Statement: Match.arrayWith([
-            Match.objectLike({ Action: 'lambda:TerminateMicrovm' })
-          ])
-        })
-      })
-    ])
+  template.hasResourceProperties('AWS::IAM::Policy', {
+    PolicyDocument: Match.objectLike({
+      Statement: Match.arrayWith([
+        Match.objectLike({ Action: 'lambda:TerminateMicrovm' })
+      ])
+    })
   });
 });

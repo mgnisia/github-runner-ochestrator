@@ -166,11 +166,11 @@ A dedicated `AWS::S3::Bucket` (`MicrovmCodeBucket`) holds `app.zip`. Its removal
 Two IAM roles are created and managed by the CDK stack:
 
 **MicrovmBuildRole** — assumed by Lambda during the `AWS::Lambda::MicrovmImage` build phase:
-- `s3:GetObject` on the code bucket (to pull `app.zip`)
-- `logs:CreateLogGroup/CreateLogStream/PutLogEvents` on `*`
+- Read access to the code bucket (granted via `bucket.grantRead`, to pull `app.zip`)
+- `logs:CreateLogGroup/CreateLogStream/PutLogEvents` on `arn:{partition}:logs:*:*:*`
 
 **MicrovmExecutionRole** — assumed by each MicroVM instance at runtime:
-- `lambda:TerminateMicrovm` on `*` (so `app.js` can self-terminate after the runner exits)
+- `lambda:TerminateMicrovm` on the MicroVM image ARN (so `app.js` can self-terminate after the runner exits)
 - `logs:CreateLogGroup/CreateLogStream/PutLogEvents` on `*`
 
 ### L1 MicrovmImage construct (`lib/microvm-image.ts`)
