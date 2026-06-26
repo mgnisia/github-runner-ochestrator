@@ -9,11 +9,12 @@
     "deploy": "cdk deploy"
   },
   "dependencies": {
+    "@aws-sdk/client-lambda-microvms": "^3.1075.0",
+    "@aws-sdk/client-ssm": ">=3.1074.0",
     "aws-cdk-lib": "^2",
     "constructs": "^10"
   },
   "devDependencies": {
-    "@aws-sdk/client-ssm": "^3",
     "@types/aws-lambda": "^8",
     "@types/jest": "^29",
     "@types/node": "^22",

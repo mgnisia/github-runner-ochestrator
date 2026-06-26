@@ -3,7 +3,14 @@ import { Template, Match } from 'aws-cdk-lib/assertions';
 import { OrchestratorStack } from '../lib/orchestrator-stack';
 
 test('synthesizes the webhook receiver infrastructure', () => {
-  const app = new App();
+  const app = new App({
+    context: {
+      microvmImageIdentifier: 'arn:aws:lambda:eu-west-1:123456789012:microvm-image:test',
+      microvmExecutionRoleArn: 'arn:aws:iam::123456789012:role/MicroVMExecutionRole',
+      microvmIngressNetworkConnectors: 'arn:aws:lambda:eu-west-1:aws:network-connector:aws-network-connector:NO_INGRESS',
+      microvmEgressNetworkConnectors: 'arn:aws:lambda:eu-west-1:aws:network-connector:aws-network-connector:INTERNET_EGRESS',
+    },
+  });
   const stack = new OrchestratorStack(app, 'TestStack');
   const template = Template.fromStack(stack);
 

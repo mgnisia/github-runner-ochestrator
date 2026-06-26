@@ -10,12 +10,36 @@ import {
   mintAppJwt,
   parseAppCredentials
 } from './github';
+import { runMicrovm } from './microvms';
+import type { MicrovmLaunchConfig } from './microvms';
 
 const WEBHOOK_SECRET_PARAM = process.env.WEBHOOK_SECRET_PARAM;
 const APP_CREDENTIALS_PARAM = process.env.GITHUB_APP_CREDENTIALS_PARAM;
 const RUNNER_GROUP_ID = Number(process.env.RUNNER_GROUP_ID ?? '1');
 const REQUIRED_LABEL = process.env.REQUIRED_RUNNER_LABEL ?? 'lambda-microvms';
 const ORG_OVERRIDE = process.env.GITHUB_ORG; // optional; otherwise derived from payload
+
+function buildMicrovmConfig(): MicrovmLaunchConfig | string {
+  const imageIdentifier = process.env.MICROVM_IMAGE_IDENTIFIER;
+  const executionRoleArn = process.env.MICROVM_EXECUTION_ROLE_ARN;
+  const ingressRaw = process.env.MICROVM_INGRESS_NETWORK_CONNECTORS;
+  const egressRaw = process.env.MICROVM_EGRESS_NETWORK_CONNECTORS;
+  if (!imageIdentifier) return 'MICROVM_IMAGE_IDENTIFIER env var is not set';
+  if (!executionRoleArn) return 'MICROVM_EXECUTION_ROLE_ARN env var is not set';
+  if (!ingressRaw) return 'MICROVM_INGRESS_NETWORK_CONNECTORS env var is not set';
+  if (!egressRaw) return 'MICROVM_EGRESS_NETWORK_CONNECTORS env var is not set';
+  return {
+    imageIdentifier,
+    executionRoleArn,
+    ingressNetworkConnectors: ingressRaw.split(',').map((s) => s.trim()),
+    egressNetworkConnectors: egressRaw.split(',').map((s) => s.trim()),
+    maxIdleDurationSeconds: Number(process.env.MICROVM_MAX_IDLE_SECONDS ?? '900'),
+    suspendedDurationSeconds: Number(process.env.MICROVM_SUSPENDED_SECONDS ?? '1800'),
+    maximumDurationInSeconds: Number(process.env.MICROVM_MAX_DURATION_SECONDS ?? '1800'),
+  };
+}
+
+const microvmConfig = buildMicrovmConfig();
 
 const ssm = new SSMClient({});
 
@@ -93,7 +117,12 @@ export const handler = async (
     return reply(422, 'missing organization');
   }
 
-  // 5. Retrieve JIT credentials via the GitHub App, then log and stop.
+  // 5. Retrieve JIT credentials via the GitHub App and launch a MicroVM.
+  if (typeof microvmConfig === 'string') {
+    console.error(microvmConfig);
+    return reply(500, 'microvm not configured');
+  }
+
   try {
     const creds = parseAppCredentials(await getAppCredentials());
     const jwt = mintAppJwt(creds.appClientId, creds.privateKey);
@@ -104,13 +133,14 @@ export const handler = async (
       labels: parsed.workflow_job?.labels ?? [REQUIRED_LABEL]
     });
 
-    // SECURITY: encoded_jit_config is a sensitive registration credential — logged ONLY for this
-    // confirmation phase (removal tracked in beads). Never log the App private key or installation token.
     console.log('JIT runner created:', JSON.stringify(jit.runner));
-    console.log('encoded_jit_config:', jit.encoded_jit_config);
-    return reply(202, 'jit config created');
+
+    const vm = await runMicrovm(microvmConfig, jit.encoded_jit_config);
+
+    console.log('MicroVM launched:', vm.microvmId, 'endpoint:', vm.endpoint);
+    return reply(202, 'microvm launched');
   } catch (err) {
-    console.error('Failed to retrieve JIT credentials:', err);
-    return reply(500, 'jit retrieval failed');
+    console.error('Failed to launch MicroVM:', err);
+    return reply(500, 'microvm launch failed');
   }
 };
