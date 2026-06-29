@@ -6,8 +6,6 @@ if [ -z "${ENCODED_JIT_CONFIG:-}" ]; then
   exit 1
 fi
 
-# The Docker daemon is started by app.js before the /ready hook and captured warm in the MicroVM
-# snapshot. After restore, app.js bounces (restarts) the daemon in the /run hook before this
-# script runs, so BuildKit gets a fresh session socket instead of a snapshot-frozen one.
-# Nothing to start or restart here — app.js owns the entire daemon lifecycle.
+# The Docker daemon is started by app.js before the /ready hook, so it is captured warm in the
+# MicroVM snapshot and restored pre-warmed on each run (see microvm/app.js). Nothing to start here.
 exec ./run.sh --jitconfig "$ENCODED_JIT_CONFIG"
