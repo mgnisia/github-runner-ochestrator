@@ -1,11 +1,100 @@
 // Lambda MicroVM lifecycle hook server — listens on port 8080 (catch-all) and 9000 (all hooks)
 const http = require('http');
-const { spawn } = require('child_process');
+const { spawn, execFile } = require('child_process');
 const zlib = require('zlib');
 const { LambdaMicrovmsClient, TerminateMicrovmCommand } = require('@aws-sdk/client-lambda-microvms');
 
 // Stored in module scope after the /run hook fires — used only for logging
 let runnerName = null;
+
+// ── Docker-in-Docker (snapshot-warmed) ────────────────────────────────────────
+// Start the Docker daemon as a child of this process (the CMD entrypoint) at startup, BEFORE we
+// signal /ready. Lambda MicroVMs snapshots the full memory state of the CMD process tree the
+// moment /ready returns 200, so a daemon that is already running and warm at that point is
+// captured in the snapshot and restored — pre-warmed — on every MicroVM run. That is why /ready
+// is gated on docker readiness (below) and why entrypoint.sh no longer starts dockerd per job.
+// A daemon started in a Dockerfile RUN step would NOT be captured: the snapshot only includes the
+// ENTRYPOINT/CMD process tree, not ephemeral build-layer processes.
+// Best-effort: if the daemon never comes up we mark it 'failed' and let /ready proceed anyway, so
+// jobs that don't need Docker are not blocked.
+let dockerState = 'starting'; // 'starting' | 'ready' | 'failed'
+const DOCKER_READY_DEADLINE_MS = 50_000; // stay within the 60s readyTimeoutInSeconds build hook
+
+function startDockerDaemon() {
+  // Pass --dns 172.17.0.1 so every container (including nested `docker build` builds) receives
+  // the dnsmasq forwarder on the docker0 bridge gateway as its resolver. Without this flag,
+  // Docker inherits the host's /etc/resolv.conf which only contains 127.0.0.2 — a loopback
+  // address that is unreachable from inside a container's network namespace.
+  const daemon = spawn('dockerd', ['--dns', '172.17.0.1'], { stdio: ['ignore', 'inherit', 'inherit'] });
+  daemon.on('error', (err) => {
+    console.error('Failed to spawn dockerd:', err);
+    dockerState = 'failed';
+  });
+  daemon.on('exit', (code, signal) => {
+    console.error(`dockerd exited — code: ${code ?? '(null)'}, signal: ${signal ?? '(null)'}`);
+    if (dockerState !== 'ready') dockerState = 'failed';
+  });
+
+  const start = Date.now();
+  const poll = () => {
+    execFile('docker', ['info'], (err) => {
+      if (!err) {
+        dockerState = 'ready';
+        console.log('Docker daemon is ready.');
+        return;
+      }
+      if (Date.now() - start > DOCKER_READY_DEADLINE_MS) {
+        dockerState = 'failed';
+        console.error('Docker daemon did not become ready in time — proceeding without it. Jobs that require Docker may fail.');
+        return;
+      }
+      setTimeout(poll, 1000);
+    });
+  };
+  poll();
+}
+
+// ── DNS forwarder (snapshot-warmed) ───────────────────────────────────────────
+// Start dnsmasq as a child of this process (the CMD entrypoint) so it is captured in the
+// Lambda MicroVM snapshot alongside dockerd and is pre-warmed on every run.
+//
+// WHY THIS IS NEEDED:
+// Lambda's DNS proxy is bound to 127.0.0.2 (loopback) in /etc/resolv.conf. Loopback
+// addresses are only reachable within the host network namespace — any Docker container
+// gets its own network namespace where 127.0.0.2 is unreachable. Docker detects loopback
+// nameservers, strips them, and substitutes its hardcoded fallback 8.8.8.8/8.8.4.4; this
+// VPC blocks public DNS egress, so all resolution inside containers fails.
+//
+// FIX: dnsmasq listens on 172.17.0.1 (the docker0 bridge gateway, reachable from every
+// Docker container), reads /etc/resolv.conf to find 127.0.0.2, and forwards queries there.
+// dockerd is started with --dns 172.17.0.1 so every container is handed this resolver.
+//
+// SNAPSHOT CAPTURE: Like dockerd, this must be spawned in the CMD/ENTRYPOINT process tree.
+// A process started in a Dockerfile RUN step lives only for that build layer and is NOT
+// captured in the snapshot — only the live CMD process tree is frozen.
+//
+// INTERFACE TIMING: docker0 is created by dockerd at daemon startup, which may race with
+// dnsmasq. --bind-dynamic handles this: dnsmasq starts without 172.17.0.1, then
+// automatically picks up the interface once docker0 appears — no retry logic needed here.
+function startDnsmasq() {
+  const proc = spawn(
+    'dnsmasq',
+    [
+      '--keep-in-foreground',    // stay a foreground child process (no daemonize); captured in snapshot
+      '--bind-dynamic',          // bind 172.17.0.1 lazily when docker0 appears after dockerd starts
+      '--listen-address=172.17.0.1', // docker0 bridge gateway — reachable from all containers
+      // upstream: dnsmasq reads /etc/resolv.conf by default, picking up 127.0.0.2 automatically
+    ],
+    { stdio: ['ignore', 'inherit', 'inherit'] },
+  );
+  proc.on('error', (err) => {
+    console.error('Failed to spawn dnsmasq:', err);
+  });
+  proc.on('exit', (code, signal) => {
+    console.error(`dnsmasq exited — code: ${code ?? '(null)'}, signal: ${signal ?? '(null)'}`);
+  });
+  console.log('dnsmasq forwarder started (172.17.0.1 → 127.0.0.2 via /etc/resolv.conf)');
+}
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -59,8 +148,16 @@ async function handleRequest(req, res) {
   console.log(`${new Date().toISOString()} ${method} ${url}`);
 
   // POST /aws/lambda-microvms/runtime/v1/ready
-  // Required during image creation so Lambda knows the server is up.
+  // Required during image creation so Lambda knows the server is up. We additionally gate the
+  // snapshot on the Docker daemon being ready, so it is captured warm: return 503 while it is
+  // still starting (Lambda retries until readyTimeoutInSeconds), then 200 once it is ready or has
+  // failed (best-effort — a docker failure should not block non-docker jobs).
   if (method === 'POST' && url === '/aws/lambda-microvms/runtime/v1/ready') {
+    if (dockerState === 'starting') {
+      res.writeHead(503);
+      res.end();
+      return;
+    }
     res.writeHead(200);
     res.end();
     return;
@@ -117,6 +214,17 @@ async function handleRequest(req, res) {
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ status: 'ok', path: url }));
 }
+
+// Kick off the Docker daemon and the dnsmasq DNS forwarder now, so both are warm before /ready
+// is answered and captured in the MicroVM snapshot.
+//
+// Dependency: dockerd creates the docker0 bridge (gateway 172.17.0.1) that dnsmasq listens on.
+// We start dockerd first and dnsmasq immediately after. dnsmasq's --bind-dynamic flag lets it
+// start without 172.17.0.1 being present and bind once docker0 appears — no explicit wait needed.
+// /ready is gated only on dockerd readiness (below); dnsmasq is best-effort like docker's own
+// health — if it fails to start, container DNS will fall back to Docker's built-in behaviour.
+startDockerDaemon();
+startDnsmasq();
 
 // Both ports share the same handler: 8080 acts as the catch-all, 9000 receives all hooks.
 for (const port of [8080, 9000]) {

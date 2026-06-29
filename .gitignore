@@ -15,3 +15,6 @@ cdk.out
 # Local environment and CDK output files
 output.json
 .env
+
+# Serena MCP server (local cache and memories)
+.serena/
