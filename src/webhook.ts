@@ -1,47 +1,18 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
+import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { matchesRunnerRequest, parseWorkflowJobEvent } from './filter';
 import type { WorkflowJobEvent } from './filter';
-import {
-  buildRunnerName,
-  generateOrgJitConfig,
-  getInstallationToken,
-  mintAppJwt,
-  parseAppCredentials
-} from './github';
-import { runMicrovm } from './microvms';
-import type { MicrovmLaunchConfig } from './microvms';
+import type { RunnerRequestMessage } from './queue';
 
 const WEBHOOK_SECRET_PARAM = process.env.WEBHOOK_SECRET_PARAM;
-const APP_CREDENTIALS_PARAM = process.env.GITHUB_APP_CREDENTIALS_PARAM;
-const RUNNER_GROUP_ID = Number(process.env.RUNNER_GROUP_ID ?? '1');
 const REQUIRED_LABEL = process.env.REQUIRED_RUNNER_LABEL ?? 'lambda-microvms';
 const ORG_OVERRIDE = process.env.GITHUB_ORG; // optional; otherwise derived from payload
-
-function buildMicrovmConfig(): MicrovmLaunchConfig | string {
-  const imageIdentifier = process.env.MICROVM_IMAGE_IDENTIFIER;
-  const executionRoleArn = process.env.MICROVM_EXECUTION_ROLE_ARN;
-  const ingressRaw = process.env.MICROVM_INGRESS_NETWORK_CONNECTORS;
-  const egressRaw = process.env.MICROVM_EGRESS_NETWORK_CONNECTORS;
-  if (!imageIdentifier) return 'MICROVM_IMAGE_IDENTIFIER env var is not set';
-  if (!executionRoleArn) return 'MICROVM_EXECUTION_ROLE_ARN env var is not set';
-  if (!ingressRaw) return 'MICROVM_INGRESS_NETWORK_CONNECTORS env var is not set';
-  if (!egressRaw) return 'MICROVM_EGRESS_NETWORK_CONNECTORS env var is not set';
-  return {
-    imageIdentifier,
-    executionRoleArn,
-    ingressNetworkConnectors: ingressRaw.split(',').map((s) => s.trim()),
-    egressNetworkConnectors: egressRaw.split(',').map((s) => s.trim()),
-    maxIdleDurationSeconds: Number(process.env.MICROVM_MAX_IDLE_SECONDS ?? '900'),
-    suspendedDurationSeconds: Number(process.env.MICROVM_SUSPENDED_SECONDS ?? '1800'),
-    maximumDurationInSeconds: Number(process.env.MICROVM_MAX_DURATION_SECONDS ?? '1800'),
-  };
-}
-
-const microvmConfig = buildMicrovmConfig();
+const QUEUE_URL = process.env.QUEUE_URL;
 
 const ssm = new SSMClient({});
+const sqs = new SQSClient({});
 
 function loadParam(name: string | undefined, envLabel: string): Promise<string> {
   if (!name) return Promise.reject(new Error(`${envLabel} env var is not set`));
@@ -53,22 +24,18 @@ function loadParam(name: string | undefined, envLabel: string): Promise<string> 
 }
 
 let cachedSecret: Promise<string> | undefined;
-let cachedCreds: Promise<string> | undefined;
 const getWebhookSecret = (): Promise<string> =>
   (cachedSecret ??= loadParam(WEBHOOK_SECRET_PARAM, 'WEBHOOK_SECRET_PARAM'));
-const getAppCredentials = (): Promise<string> =>
-  (cachedCreds ??= loadParam(APP_CREDENTIALS_PARAM, 'GITHUB_APP_CREDENTIALS_PARAM'));
 
-// Warm both during init; no-op catch avoids an init-time unhandledRejection (handler re-awaits).
+// Warm up during init; no-op catch avoids an init-time unhandledRejection (handler re-awaits).
 getWebhookSecret().catch(() => undefined);
-getAppCredentials().catch(() => undefined);
 
 const reply = (statusCode: number, body: string): APIGatewayProxyResultV2 => ({ statusCode, body });
 
 export const handler = async (
   event: APIGatewayProxyEventV2
 ): Promise<APIGatewayProxyResultV2> => {
-  // 1. Verify HMAC signature (Phase 1 behaviour).
+  // 1. Verify HMAC signature.
   let secret: string;
   try {
     secret = await getWebhookSecret();
@@ -95,7 +62,7 @@ export const handler = async (
     return reply(200, 'ignored');
   }
 
-  // 3. Parse + filter. (Annotated type; the catch returns, so TS sees `parsed` as definitely assigned.)
+  // 3. Parse + filter.
   let parsed: WorkflowJobEvent;
   try {
     parsed = parseWorkflowJobEvent(rawBody.toString('utf8'));
@@ -117,46 +84,27 @@ export const handler = async (
     return reply(422, 'missing organization');
   }
 
-  // 5. Retrieve JIT credentials via the GitHub App and launch a MicroVM.
-  if (typeof microvmConfig === 'string') {
-    console.error(microvmConfig);
-    return reply(500, 'microvm not configured');
-  }
-
+  // 5. Enqueue the runner request for async processing by the worker Lambda.
   const runId = parsed.workflow_job?.run_id;
-  const runnerName = buildRunnerName(runId);
   const labels = parsed.workflow_job?.labels ?? [REQUIRED_LABEL];
 
-  console.log(`[${runId}] Launching runner '${runnerName}' for org '${org}' with labels: ${labels.join(', ')}`);
+  if (!QUEUE_URL) {
+    console.error('QUEUE_URL env var is not set');
+    return reply(500, 'queue not configured');
+  }
 
-  let stage = 'getInstallationToken';
-  const tryStart = Date.now();
-  let t = tryStart;
+  const message: RunnerRequestMessage = { org, runId, labels };
   try {
-    const creds = parseAppCredentials(await getAppCredentials());
-    const jwt = mintAppJwt(creds.appClientId, creds.privateKey);
-
-    t = Date.now();
-    const token = await getInstallationToken(jwt, creds.installationId);
-    console.log(`[${runId}] getInstallationToken: ${Date.now() - t}ms`);
-
-    stage = 'generateOrgJitConfig';
-    t = Date.now();
-    const jit = await generateOrgJitConfig(token, org, {
-      name: runnerName,
-      runnerGroupId: RUNNER_GROUP_ID,
-      labels,
-    });
-    console.log(`[${runId}] generateOrgJitConfig: ${Date.now() - t}ms — JIT runner created:`, JSON.stringify(jit.runner));
-
-    stage = 'runMicrovm';
-    t = Date.now();
-    const vm = await runMicrovm(microvmConfig, jit.encoded_jit_config);
-    console.log(`[${runId}] runMicrovm: ${Date.now() - t}ms — MicroVM launched: ${vm.microvmId}, endpoint: ${vm.endpoint}`);
-
-    return reply(202, 'microvm launched');
+    const result = await sqs.send(
+      new SendMessageCommand({
+        QueueUrl: QUEUE_URL,
+        MessageBody: JSON.stringify(message),
+      })
+    );
+    console.log(`[${runId}] Enqueued runner request for org '${org}', labels: ${labels.join(', ')} — MessageId: ${result.MessageId}`);
+    return reply(202, 'queued');
   } catch (err) {
-    console.error(`[${runId}] Failed at stage '${stage}' after ${Date.now() - tryStart}ms — Failed to launch MicroVM:`, err);
-    return reply(500, 'microvm launch failed');
+    console.error(`[${runId}] Failed to enqueue runner request:`, err);
+    return reply(500, 'enqueue failed');
   }
 };

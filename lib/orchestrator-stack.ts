@@ -3,9 +3,11 @@ import { Duration, Stack, StackProps, CfnOutput } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
+import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
 import { HttpApi, HttpMethod } from 'aws-cdk-lib/aws-apigatewayv2';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import { requireEnv } from './helpers';
@@ -106,7 +108,18 @@ export class OrchestratorStack extends Stack {
         { parameterName: appCredentialsParamName }
       );
 
-      // ── Orchestrator Lambda ──────────────────────────────────────────────────
+      // ── SQS Queues ──────────────────────────────────────────────────────────
+      const dlq = new sqs.Queue(this, 'WebhookDlq', {
+        retentionPeriod: Duration.days(14),
+      });
+
+      const queue = new sqs.Queue(this, 'WebhookQueue', {
+        visibilityTimeout: Duration.seconds(30),
+        deadLetterQueue: { queue: dlq, maxReceiveCount: 3 },
+      });
+
+      // ── Receiver Lambda (Orchestrator) ───────────────────────────────────────
+      // Logical id kept as 'Orchestrator' to avoid replacing the API integration resource.
       const orchestrator = new NodejsFunction(this, 'Orchestrator', {
         // __dirname is lib/ at runtime (ts-node), so go up one level to reach src/.
         entry: path.join(__dirname, '..', 'src', 'webhook.ts'),
@@ -120,6 +133,27 @@ export class OrchestratorStack extends Stack {
         environment: {
           // Pass the literal name string. NEVER webhookSecret.stringValue (throws without a version).
           WEBHOOK_SECRET_PARAM: parameterName,
+          REQUIRED_RUNNER_LABEL: requiredRunnerLabel,
+          QUEUE_URL: queue.queueUrl,
+        },
+        timeout: Duration.seconds(10),
+        memorySize: 256,
+        // Do NOT set `logRetention` here — it injects a second Lambda + custom resource.
+        // If retention is ever needed, create an explicit logs.LogGroup.
+      });
+
+      // Receiver only needs webhook secret + SQS send permission.
+      webhookSecret.grantRead(orchestrator);
+      queue.grantSendMessages(orchestrator);
+
+      // ── Worker Lambda ────────────────────────────────────────────────────────
+      // Consumes SQS messages, mints JIT tokens, launches MicroVMs with retry.
+      const worker = new NodejsFunction(this, 'Worker', {
+        entry: path.join(__dirname, '..', 'src', 'worker.ts'),
+        handler: 'handler',
+        runtime: lambda.Runtime.NODEJS_22_X,
+        bundling: { externalModules: [] },
+        environment: {
           GITHUB_APP_CREDENTIALS_PARAM: appCredentialsParamName,
           RUNNER_GROUP_ID: runnerGroupId,
           REQUIRED_RUNNER_LABEL: requiredRunnerLabel,
@@ -133,34 +167,28 @@ export class OrchestratorStack extends Stack {
         },
         timeout: Duration.seconds(25),
         memorySize: 256,
-        // Do NOT set `logRetention` here — it injects a second Lambda + custom resource.
-        // If retention is ever needed, create an explicit logs.LogGroup.
       });
 
-      // Grants ssm:GetParameter*/GetParameters/etc. on the parameter ARN.
-      webhookSecret.grantRead(orchestrator);
-      appCredentials.grantRead(orchestrator);
-
-      orchestrator.addToRolePolicy(
+      appCredentials.grantRead(worker);
+      worker.addToRolePolicy(
         new iam.PolicyStatement({
           actions: ['lambda:RunMicrovm'],
           resources: [microvmImageArn],
         })
       );
-
-      orchestrator.addToRolePolicy(
+      worker.addToRolePolicy(
         new iam.PolicyStatement({
           actions: ['lambda:PassNetworkConnector'],
           resources: [ingressConnectorArn, egressConnectorArn],
         })
       );
-
-      orchestrator.addToRolePolicy(
+      worker.addToRolePolicy(
         new iam.PolicyStatement({
           actions: ['iam:PassRole'],
           resources: [executionRole.roleArn],
         })
       );
+      worker.addEventSource(new SqsEventSource(queue, { batchSize: 1 }));
 
       // ── API Gateway ────────────────────────────────────────────────────────
       const httpApi = new HttpApi(this, 'WebhookApi');
@@ -175,6 +203,8 @@ export class OrchestratorStack extends Stack {
       new CfnOutput(this, 'WebhookSecretParamName', { value: parameterName });
       new CfnOutput(this, 'AppCredentialsParamName', { value: appCredentialsParamName });
       new CfnOutput(this, 'MicrovmImageArn', { value: microvmImageArn });
+      new CfnOutput(this, 'QueueUrl', { value: queue.queueUrl });
+      new CfnOutput(this, 'DlqUrl', { value: dlq.queueUrl });
     }
   }
 }
