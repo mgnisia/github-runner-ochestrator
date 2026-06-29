@@ -81,6 +81,12 @@ test('Phase B: synthesizes orchestrator Lambda + API Gateway when MICROVM_IMAGE_
       }),
     });
 
+    // Orchestrator Lambda has the expected timeout and memory size
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Timeout: 25,
+      MemorySize: 256,
+    });
+
     // AppCredentialsParamName output is present
     template.hasOutput('AppCredentialsParamName', {});
   } finally {
