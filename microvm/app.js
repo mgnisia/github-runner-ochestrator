@@ -7,51 +7,134 @@ const { LambdaMicrovmsClient, TerminateMicrovmCommand } = require('@aws-sdk/clie
 // Stored in module scope after the /run hook fires — used only for logging
 let runnerName = null;
 
-// ── Docker-in-Docker (snapshot-warmed) ────────────────────────────────────────
-// Start the Docker daemon as a child of this process (the CMD entrypoint) at startup, BEFORE we
-// signal /ready. Lambda MicroVMs snapshots the full memory state of the CMD process tree the
-// moment /ready returns 200, so a daemon that is already running and warm at that point is
-// captured in the snapshot and restored — pre-warmed — on every MicroVM run. That is why /ready
-// is gated on docker readiness (below) and why entrypoint.sh no longer starts dockerd per job.
-// A daemon started in a Dockerfile RUN step would NOT be captured: the snapshot only includes the
-// ENTRYPOINT/CMD process tree, not ephemeral build-layer processes.
-// Best-effort: if the daemon never comes up we mark it 'failed' and let /ready proceed anyway, so
-// jobs that don't need Docker are not blocked.
-let dockerState = 'starting'; // 'starting' | 'ready' | 'failed'
+// ── Docker-in-Docker (snapshot-warmed, per-job bounced) ───────────────────────
+// The Docker daemon is spawned here at startup (build time), before /ready returns 200. Lambda
+// MicroVMs snapshots the full CMD process tree at that moment, so a warm, healthy daemon is
+// captured and restored on every run — saving the ~1 min cold-start penalty.
+//
+// However, snapshot/restore freezes and then thaws all in-memory state, including the gRPC
+// session sockets that BuildKit holds open. The restored daemon keeps a dead, never-released
+// session connection slot, causing BuildKit to log perpetual:
+//   "session healthcheck failed fatally ... only one connection allowed"
+//
+// Fix: after restore, bounce (restart) dockerd once per job in the /run hook before the GitHub
+// Actions runner starts. The overlay2 layers are already on disk from the warm snapshot, so the
+// fresh daemon is ready in ~1-2s — far cheaper than a cold start. This restart is intentional;
+// the per-job exit is suppressed (restartingDocker flag) so it does not look like a crash.
+//
+// dnsmasq is NOT restarted — its --bind-dynamic flag automatically re-binds to 172.17.0.1 when
+// dockerd recreates the docker0 bridge on the fresh daemon start.
+//
+// Best-effort: if the daemon never comes up we mark it 'failed' and let /ready proceed anyway,
+// so jobs that don't need Docker are not blocked.
+let dockerState = 'starting';  // 'starting' | 'ready' | 'failed'
+let dockerdProcess = null;     // retained so restartDockerDaemon() can kill it
+let restartingDocker = false;  // suppresses exit-handler noise during intentional bounces
 const DOCKER_READY_DEADLINE_MS = 50_000; // stay within the 60s readyTimeoutInSeconds build hook
 
-function startDockerDaemon() {
+// Polls `docker info` until it succeeds or the deadline is reached.
+// Returns a Promise that resolves to true (ready) or false (timed out).
+// Used by both build-time startup and run-time restart to avoid duplicating the poll loop.
+function waitForDockerReady(deadlineMs) {
+  return new Promise((resolve) => {
+    const start = Date.now();
+    const poll = () => {
+      execFile('docker', ['info'], (err) => {
+        if (!err) {
+          resolve(true);
+          return;
+        }
+        if (Date.now() - start > deadlineMs) {
+          resolve(false);
+          return;
+        }
+        setTimeout(poll, 1000);
+      });
+    };
+    poll();
+  });
+}
+
+// Spawns `dockerd --dns 172.17.0.1` and attaches error/exit handlers. Returns the child process.
+// The restartingDocker flag suppresses the exit log and state change during intentional bounces
+// so a controlled restart does not look like a crash.
+function spawnDockerDaemon() {
   // Pass --dns 172.17.0.1 so every container (including nested `docker build` builds) receives
   // the dnsmasq forwarder on the docker0 bridge gateway as its resolver. Without this flag,
   // Docker inherits the host's /etc/resolv.conf which only contains 127.0.0.2 — a loopback
   // address that is unreachable from inside a container's network namespace.
-  const daemon = spawn('dockerd', ['--dns', '172.17.0.1'], { stdio: ['ignore', 'inherit', 'inherit'] });
-  daemon.on('error', (err) => {
+  const proc = spawn('dockerd', ['--dns', '172.17.0.1'], { stdio: ['ignore', 'inherit', 'inherit'] });
+  proc.on('error', (err) => {
+    if (restartingDocker) return;
     console.error('Failed to spawn dockerd:', err);
     dockerState = 'failed';
   });
-  daemon.on('exit', (code, signal) => {
+  proc.on('exit', (code, signal) => {
+    if (restartingDocker) return; // intentional bounce — restartDockerDaemon() will re-spawn
     console.error(`dockerd exited — code: ${code ?? '(null)'}, signal: ${signal ?? '(null)'}`);
     if (dockerState !== 'ready') dockerState = 'failed';
   });
+  return proc;
+}
 
-  const start = Date.now();
-  const poll = () => {
-    execFile('docker', ['info'], (err) => {
-      if (!err) {
-        dockerState = 'ready';
-        console.log('Docker daemon is ready.');
-        return;
-      }
-      if (Date.now() - start > DOCKER_READY_DEADLINE_MS) {
-        dockerState = 'failed';
-        console.error('Docker daemon did not become ready in time — proceeding without it. Jobs that require Docker may fail.');
-        return;
-      }
-      setTimeout(poll, 1000);
-    });
-  };
-  poll();
+// Build-time: spawn the daemon and wait for readiness before /ready is answered.
+// Times and logs the warm-up so snapshot build latency is observable.
+async function startDockerDaemon() {
+  const buildStart = Date.now();
+  dockerdProcess = spawnDockerDaemon();
+  const ready = await waitForDockerReady(DOCKER_READY_DEADLINE_MS);
+  const elapsed = Date.now() - buildStart;
+  if (ready) {
+    dockerState = 'ready';
+    console.log('Docker daemon is ready.');
+    console.log(`[timing] build-phase docker warm-up: ${elapsed}ms`);
+  } else {
+    dockerState = 'failed';
+    console.error('Docker daemon did not become ready in time — proceeding without it. Jobs that require Docker may fail.');
+    console.error(`[timing] build-phase docker warm-up: ${elapsed}ms (timed out)`);
+  }
+}
+
+// Run-time: bounce the daemon once per job after restore so BuildKit gets a fresh session socket.
+// SIGTERM → wait for exit (SIGKILL fallback after 5s) → re-spawn → wait for readiness.
+// Best-effort: logs on failure and proceeds so non-docker jobs are not blocked.
+async function restartDockerDaemon() {
+  const restartStart = Date.now();
+  console.log('Bouncing Docker daemon post-restore (snapshot-frozen BuildKit session sockets cannot survive restore)...');
+
+  try {
+    restartingDocker = true;
+    if (dockerdProcess && dockerdProcess.exitCode === null) {
+      dockerdProcess.kill('SIGTERM');
+      await new Promise((resolve) => {
+        const fallback = setTimeout(() => {
+          console.warn('dockerd did not exit within 5s — sending SIGKILL');
+          if (dockerdProcess && dockerdProcess.exitCode === null) dockerdProcess.kill('SIGKILL');
+        }, 5000);
+        dockerdProcess.once('exit', () => {
+          clearTimeout(fallback);
+          resolve();
+        });
+      });
+    }
+  } finally {
+    restartingDocker = false;
+  }
+
+  dockerState = 'starting';
+  dockerdProcess = spawnDockerDaemon();
+
+  const ready = await waitForDockerReady(DOCKER_READY_DEADLINE_MS);
+  const elapsed = Date.now() - restartStart;
+  if (ready) {
+    dockerState = 'ready';
+    console.log('Docker daemon restarted and ready.');
+    console.log(`[timing] run-phase docker restart: ${elapsed}ms`);
+  } else {
+    dockerState = 'failed';
+    console.error('Docker daemon did not become ready after restart — proceeding. Jobs that require Docker may fail.');
+    console.error(`[timing] run-phase docker restart: ${elapsed}ms (timed out)`);
+  }
 }
 
 // ── DNS forwarder (snapshot-warmed) ───────────────────────────────────────────
@@ -76,6 +159,8 @@ function startDockerDaemon() {
 // INTERFACE TIMING: docker0 is created by dockerd at daemon startup, which may race with
 // dnsmasq. --bind-dynamic handles this: dnsmasq starts without 172.17.0.1, then
 // automatically picks up the interface once docker0 appears — no retry logic needed here.
+// This same --bind-dynamic behaviour means dnsmasq does NOT need to be restarted when
+// dockerd is bounced per-job: it re-binds to 172.17.0.1 once the fresh docker0 appears.
 function startDnsmasq() {
   const proc = spawn(
     'dnsmasq',
@@ -165,6 +250,8 @@ async function handleRequest(req, res) {
 
   // POST /aws/lambda-microvms/runtime/v1/run
   // Receives per-instance JIT config, derives the runner name, and spawns entrypoint.sh.
+  // Before spawning, restartDockerDaemon() bounces the snapshot-restored daemon so BuildKit
+  // starts with a fresh session socket (snapshot-frozen sockets cannot survive restore).
   // Termination is handled here: when the child exits (regardless of exit code or signal),
   // terminateSelf() is called so the VM stops promptly without relying on the AWS CLI.
   if (method === 'POST' && url === '/aws/lambda-microvms/runtime/v1/run') {
@@ -176,6 +263,13 @@ async function handleRequest(req, res) {
       runnerName = runnerNameFromJitConfig(encodedJitConfig);
       console.log('MicroVM ID:', microvmId ?? '(unknown)');
       console.log('Runner name from JIT config:', runnerName);
+
+      // Bounce the daemon before starting the runner — best-effort, never throws.
+      try {
+        await restartDockerDaemon();
+      } catch (err) {
+        console.error('Docker daemon restart encountered an unexpected error — proceeding:', err);
+      }
 
       const child = spawn('./entrypoint.sh', [], {
         stdio: 'inherit',
@@ -223,7 +317,10 @@ async function handleRequest(req, res) {
 // start without 172.17.0.1 being present and bind once docker0 appears — no explicit wait needed.
 // /ready is gated only on dockerd readiness (below); dnsmasq is best-effort like docker's own
 // health — if it fails to start, container DNS will fall back to Docker's built-in behaviour.
-startDockerDaemon();
+startDockerDaemon().catch((err) => {
+  console.error('Unexpected error in startDockerDaemon:', err);
+  dockerState = 'failed';
+});
 startDnsmasq();
 
 // Both ports share the same handler: 8080 acts as the catch-all, 9000 receives all hooks.
