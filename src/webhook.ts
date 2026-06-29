@@ -123,24 +123,40 @@ export const handler = async (
     return reply(500, 'microvm not configured');
   }
 
+  const runId = parsed.workflow_job?.run_id;
+  const runnerName = buildRunnerName(runId);
+  const labels = parsed.workflow_job?.labels ?? [REQUIRED_LABEL];
+
+  console.log(`[${runId}] Launching runner '${runnerName}' for org '${org}' with labels: ${labels.join(', ')}`);
+
+  let stage = 'getInstallationToken';
+  const tryStart = Date.now();
+  let t = tryStart;
   try {
     const creds = parseAppCredentials(await getAppCredentials());
     const jwt = mintAppJwt(creds.appClientId, creds.privateKey);
+
+    t = Date.now();
     const token = await getInstallationToken(jwt, creds.installationId);
+    console.log(`[${runId}] getInstallationToken: ${Date.now() - t}ms`);
+
+    stage = 'generateOrgJitConfig';
+    t = Date.now();
     const jit = await generateOrgJitConfig(token, org, {
-      name: buildRunnerName(parsed.workflow_job?.run_id),
+      name: runnerName,
       runnerGroupId: RUNNER_GROUP_ID,
-      labels: parsed.workflow_job?.labels ?? [REQUIRED_LABEL]
+      labels,
     });
+    console.log(`[${runId}] generateOrgJitConfig: ${Date.now() - t}ms — JIT runner created:`, JSON.stringify(jit.runner));
 
-    console.log('JIT runner created:', JSON.stringify(jit.runner));
-
+    stage = 'runMicrovm';
+    t = Date.now();
     const vm = await runMicrovm(microvmConfig, jit.encoded_jit_config);
+    console.log(`[${runId}] runMicrovm: ${Date.now() - t}ms — MicroVM launched: ${vm.microvmId}, endpoint: ${vm.endpoint}`);
 
-    console.log('MicroVM launched:', vm.microvmId, 'endpoint:', vm.endpoint);
     return reply(202, 'microvm launched');
   } catch (err) {
-    console.error('Failed to launch MicroVM:', err);
+    console.error(`[${runId}] Failed at stage '${stage}' after ${Date.now() - tryStart}ms — Failed to launch MicroVM:`, err);
     return reply(500, 'microvm launch failed');
   }
 };

@@ -1,5 +1,5 @@
 import * as path from 'node:path';
-import { Stack, StackProps, CfnOutput } from 'aws-cdk-lib';
+import { Duration, Stack, StackProps, CfnOutput } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as s3 from 'aws-cdk-lib/aws-s3';
@@ -131,6 +131,8 @@ export class OrchestratorStack extends Stack {
           MICROVM_SUSPENDED_SECONDS: microvmSuspendedSeconds,
           MICROVM_MAX_DURATION_SECONDS: microvmMaxDurationSeconds,
         },
+        timeout: Duration.seconds(25),
+        memorySize: 256,
         // Do NOT set `logRetention` here — it injects a second Lambda + custom resource.
         // If retention is ever needed, create an explicit logs.LogGroup.
       });
