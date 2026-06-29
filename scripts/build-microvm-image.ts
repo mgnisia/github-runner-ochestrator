@@ -19,6 +19,7 @@ import {
   CreateMicrovmImageCommand,
   UpdateMicrovmImageCommand,
   GetMicrovmImageCommand,
+  Capability,
 } from '@aws-sdk/client-lambda-microvms';
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -176,6 +177,14 @@ async function createOrUpdate(
     codeArtifact: { uri: params.codeArtifactUri },
     baseImageArn: params.baseImageArn,
     buildRoleArn: params.buildRoleArn,
+    // Grant elevated Linux capabilities inside the MicroVM (the only supported value is ["ALL"]).
+    // Required for the Docker-in-Docker daemon started in entrypoint.sh, which needs to mount
+    // filesystems and create network namespaces. Capabilities apply within the VM isolation
+    // boundary only. See https://docs.aws.amazon.com/lambda/latest/dg/microvms-images.html
+    additionalOsCapabilities: [Capability.ALL],
+    resources: [{
+      minimumMemoryInMiB: 4096,
+    }],
     hooks: {
       port: 9000,
       microvmImageHooks: {

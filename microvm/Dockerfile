@@ -4,13 +4,33 @@ ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-      ca-certificates curl gnupg tar gzip net-tools && \
+      ca-certificates curl gnupg tar gzip net-tools git jq dnsmasq unzip && \
     rm -rf /var/lib/apt/lists/*
 
 # Node.js 22 (NodeSource — Ubuntu's repos only ship Node 18)
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
     rm -rf /var/lib/apt/lists/*
+
+# Docker engine (daemon + CLI + buildx) for jobs that bundle assets via Docker, e.g. CDK's
+# aws-lambda-python-alpha PythonFunction. The daemon is started in entrypoint.sh at job time
+# (Docker-in-Docker); there is no init system in the microVM to start it for us.
+RUN install -m 0755 -d /etc/apt/keyrings && \
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc && \
+    chmod a+r /etc/apt/keyrings/docker.asc && \
+    echo "deb [arch=arm64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable" \
+      > /etc/apt/sources.list.d/docker.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+      docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin iptables && \
+    rm -rf /var/lib/apt/lists/*
+
+# AWS CLI v2 — jobs commonly invoke `aws` (it is not in the Ubuntu base image). ARM64 build,
+# installed to /usr/local/bin/aws by the bundled installer.
+RUN curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o /tmp/awscliv2.zip && \
+    unzip -q /tmp/awscliv2.zip -d /tmp && \
+    /tmp/aws/install && \
+    rm -rf /tmp/awscliv2.zip /tmp/aws
 
 ENV RUNNER_VERSION=2.335.1
 WORKDIR /actions-runner
@@ -48,6 +68,18 @@ RUN set -eux; \
     tar xzf /tmp/py/python.tar.gz -C /tmp/py; \
     ( cd /tmp/py && bash ./setup.sh ); \
     rm -rf /tmp/py
+
+# setup.sh only installs into the tool cache; its bin/ is added to PATH solely when a workflow
+# runs actions/setup-python. Make the interpreter available to every user/job by symlinking it
+# into /usr/local/bin and putting its bin/ on the global PATH (inherited by the runner and jobs),
+# so `python`/`pip` work even without the setup-python action (fixes "pip: command not found").
+RUN set -eux; \
+    py_bin="${AGENT_TOOLSDIRECTORY}/Python/${PYTHON_VERSION}/${PYTHON_ARCH}/bin"; \
+    ln -sf "${py_bin}/python3" /usr/local/bin/python3; \
+    ln -sf "${py_bin}/python3" /usr/local/bin/python; \
+    ln -sf "${py_bin}/pip3" /usr/local/bin/pip3; \
+    ln -sf "${py_bin}/pip3" /usr/local/bin/pip
+ENV PATH="${AGENT_TOOLSDIRECTORY}/Python/${PYTHON_VERSION}/${PYTHON_ARCH}/bin:${PATH}"
 
 COPY entrypoint.sh .
 RUN chmod +x entrypoint.sh
