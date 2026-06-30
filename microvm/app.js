@@ -8,6 +8,11 @@ const { LambdaMicrovmsClient, TerminateMicrovmCommand } = require('@aws-sdk/clie
 let runnerName = null;
 
 // ── Docker-in-Docker (snapshot-warmed) ────────────────────────────────────────
+// HAS_DOCKER is true when the image was built from Dockerfile.docker (ENV RUNNER_HAS_DOCKER=1).
+// When false (Dockerfile.base / slim flavor) dockerState is pre-set to 'ready', so /ready returns
+// 200 immediately and startDockerDaemon/startDnsmasq are never called — no docker, no dnsmasq.
+const HAS_DOCKER = process.env.RUNNER_HAS_DOCKER === '1';
+
 // Start the Docker daemon as a child of this process (the CMD entrypoint) at startup, BEFORE we
 // signal /ready. Lambda MicroVMs snapshots the full memory state of the CMD process tree the
 // moment /ready returns 200, so a daemon that is already running and warm at that point is
@@ -17,7 +22,7 @@ let runnerName = null;
 // ENTRYPOINT/CMD process tree, not ephemeral build-layer processes.
 // Best-effort: if the daemon never comes up we mark it 'failed' and let /ready proceed anyway, so
 // jobs that don't need Docker are not blocked.
-let dockerState = 'starting'; // 'starting' | 'ready' | 'failed'
+let dockerState = HAS_DOCKER ? 'starting' : 'ready'; // 'starting' | 'ready' | 'failed'
 const DOCKER_READY_DEADLINE_MS = 50_000; // stay within the 60s readyTimeoutInSeconds build hook
 
 function startDockerDaemon() {
@@ -223,8 +228,11 @@ async function handleRequest(req, res) {
 // start without 172.17.0.1 being present and bind once docker0 appears — no explicit wait needed.
 // /ready is gated only on dockerd readiness (below); dnsmasq is best-effort like docker's own
 // health — if it fails to start, container DNS will fall back to Docker's built-in behaviour.
-startDockerDaemon();
-startDnsmasq();
+// HAS_DOCKER=false (Dockerfile.base): dockerState is already 'ready'; neither daemon is started.
+if (HAS_DOCKER) {
+  startDockerDaemon();
+  startDnsmasq();
+}
 
 // Both ports share the same handler: 8080 acts as the catch-all, 9000 receives all hooks.
 for (const port of [8080, 9000]) {
