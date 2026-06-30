@@ -101,8 +101,21 @@ function prewarmDockerImages() {
   const start = Date.now();
 
   // Write vendored Dockerfile to a temp dir so `docker build` has a build context.
-  const uvDockerfileDir = fs.mkdtempSync(path.join(os.tmpdir(), 'uv-prewarm-'));
-  fs.writeFileSync(path.join(uvDockerfileDir, 'Dockerfile'), UV_BUNDLING_DOCKERFILE);
+  // mkdtemp/writeFile are synchronous and could throw (e.g. /tmp unwritable). Guard them so a
+  // failure here lands on the 'failed' terminal state rather than leaving prewarmState 'pending'
+  // (which would never let /ready return 200) or throwing out of this poll callback.
+  let uvDockerfileDir;
+  try {
+    uvDockerfileDir = fs.mkdtempSync(path.join(os.tmpdir(), 'uv-prewarm-'));
+    fs.writeFileSync(path.join(uvDockerfileDir, 'Dockerfile'), UV_BUNDLING_DOCKERFILE);
+  } catch (err) {
+    prewarmState = 'failed';
+    console.error(
+      `uv bundling image prewarm FAILED (temp dir setup) after ${Date.now() - start}ms — cdk synth will build fresh.`,
+      err.message,
+    );
+    return;
+  }
 
   console.log(`Prewarming SAM base image: ${SAM_BASE_IMAGE}`);
   execFile(
