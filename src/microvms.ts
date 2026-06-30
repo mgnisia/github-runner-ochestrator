@@ -36,8 +36,8 @@ export function buildMicrovmConfig(): MicrovmLaunchConfig | string {
     ingressNetworkConnectors: ingressRaw.split(',').map((s) => s.trim()),
     egressNetworkConnectors: egressRaw.split(',').map((s) => s.trim()),
     maxIdleDurationSeconds: Number(process.env.MICROVM_MAX_IDLE_SECONDS ?? '900'),
-    suspendedDurationSeconds: Number(process.env.MICROVM_SUSPENDED_SECONDS ?? '1800'),
-    maximumDurationInSeconds: Number(process.env.MICROVM_MAX_DURATION_SECONDS ?? '1800'),
+    suspendedDurationSeconds: Number(process.env.MICROVM_SUSPENDED_SECONDS ?? '3600'),
+    maximumDurationInSeconds: Number(process.env.MICROVM_MAX_DURATION_SECONDS ?? '3600'),
   };
 }
 

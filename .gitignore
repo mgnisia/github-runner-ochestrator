@@ -18,3 +18,4 @@ output.json
 
 # Serena MCP server (local cache and memories)
 .serena/
+.tokensave
