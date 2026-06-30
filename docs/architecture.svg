@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1300 300" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif" role="img" aria-label="High-level architecture: GitHub webhook to API Gateway to Lambda orchestrator to SQS to Lambda worker to Lambda MicroVM ephemeral runner">
+  <title>GitHub Ephemeral Runner Orchestrator — high-level architecture</title>
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#5a6573"/>
+    </marker>
+    <marker id="arrowDashed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#8a93a3"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1300" height="300" fill="#ffffff"/>
+
+  <!-- ===== Boxes ===== -->
+  <!-- 1. GitHub -->
+  <g>
+    <rect x="20" y="80" width="150" height="90" rx="10" fill="#1f2328"/>
+    <text x="95" y="120" text-anchor="middle" fill="#ffffff" font-size="17" font-weight="600">GitHub</text>
+    <text x="95" y="142" text-anchor="middle" fill="#c9d1d9" font-size="11">workflow_job</text>
+    <text x="95" y="156" text-anchor="middle" fill="#c9d1d9" font-size="11">webhook</text>
+  </g>
+
+  <!-- 2. API Gateway -->
+  <g>
+    <rect x="240" y="80" width="150" height="90" rx="10" fill="#a166ff"/>
+    <text x="315" y="116" text-anchor="middle" fill="#ffffff" font-size="16" font-weight="600">API Gateway</text>
+    <text x="315" y="138" text-anchor="middle" fill="#f1ecff" font-size="11">HTTP API</text>
+    <text x="315" y="153" text-anchor="middle" fill="#f1ecff" font-size="11">POST /webhook</text>
+  </g>
+
+  <!-- 3. Lambda Orchestrator -->
+  <g>
+    <rect x="460" y="80" width="150" height="90" rx="10" fill="#ed7100"/>
+    <text x="535" y="112" text-anchor="middle" fill="#ffffff" font-size="16" font-weight="600">Lambda</text>
+    <text x="535" y="133" text-anchor="middle" fill="#fff3e8" font-size="11">Orchestrator</text>
+    <text x="535" y="148" text-anchor="middle" fill="#fff3e8" font-size="11">verify HMAC +</text>
+    <text x="535" y="161" text-anchor="middle" fill="#fff3e8" font-size="11">filter event</text>
+  </g>
+
+  <!-- 4. SQS -->
+  <g>
+    <rect x="680" y="80" width="150" height="90" rx="10" fill="#e7157b"/>
+    <text x="755" y="116" text-anchor="middle" fill="#ffffff" font-size="16" font-weight="600">Amazon SQS</text>
+    <text x="755" y="138" text-anchor="middle" fill="#ffe3f1" font-size="11">runner request</text>
+    <text x="755" y="153" text-anchor="middle" fill="#ffe3f1" font-size="11">queue (+ DLQ)</text>
+  </g>
+
+  <!-- 5. Lambda Worker -->
+  <g>
+    <rect x="900" y="80" width="150" height="90" rx="10" fill="#ed7100"/>
+    <text x="975" y="112" text-anchor="middle" fill="#ffffff" font-size="16" font-weight="600">Lambda</text>
+    <text x="975" y="133" text-anchor="middle" fill="#fff3e8" font-size="11">Worker</text>
+    <text x="975" y="148" text-anchor="middle" fill="#fff3e8" font-size="11">mint JIT</text>
+    <text x="975" y="161" text-anchor="middle" fill="#fff3e8" font-size="11">credentials</text>
+  </g>
+
+  <!-- 6. Lambda MicroVM -->
+  <g>
+    <rect x="1120" y="80" width="160" height="90" rx="10" fill="#ed7100" stroke="#7a3c00" stroke-width="2"/>
+    <text x="1200" y="112" text-anchor="middle" fill="#ffffff" font-size="15" font-weight="600">Lambda MicroVM</text>
+    <text x="1200" y="134" text-anchor="middle" fill="#fff3e8" font-size="11">ephemeral</text>
+    <text x="1200" y="148" text-anchor="middle" fill="#fff3e8" font-size="11">self-hosted</text>
+    <text x="1200" y="161" text-anchor="middle" fill="#fff3e8" font-size="11">runner</text>
+  </g>
+
+  <!-- ===== Forward arrows ===== -->
+  <g stroke="#5a6573" stroke-width="2" fill="none">
+    <line x1="170" y1="125" x2="238" y2="125" marker-end="url(#arrow)"/>
+    <line x1="390" y1="125" x2="458" y2="125" marker-end="url(#arrow)"/>
+    <line x1="610" y1="125" x2="678" y2="125" marker-end="url(#arrow)"/>
+    <line x1="830" y1="125" x2="898" y2="125" marker-end="url(#arrow)"/>
+    <line x1="1050" y1="125" x2="1118" y2="125" marker-end="url(#arrow)"/>
+  </g>
+
+  <!-- Forward arrow labels -->
+  <g fill="#41495a" font-size="10.5" text-anchor="middle">
+    <text x="204" y="116">webhook</text>
+    <text x="424" y="116">invoke</text>
+    <text x="644" y="116">enqueue</text>
+    <text x="864" y="116">trigger</text>
+    <text x="1084" y="116">RunMicrovm</text>
+  </g>
+
+  <!-- ===== Return path: MicroVM registers with GitHub and runs the job ===== -->
+  <g stroke="#8a93a3" stroke-width="2" stroke-dasharray="6 5" fill="none">
+    <path d="M1200 170 L1200 240 L95 240 L95 170" marker-end="url(#arrowDashed)"/>
+  </g>
+  <text x="650" y="232" text-anchor="middle" fill="#6b7280" font-size="11.5" font-style="italic">registers as a just-in-time (JIT) self-hosted runner and executes the workflow job</text>
+
+  <!-- Title -->
+  <text x="20" y="40" fill="#1f2328" font-size="18" font-weight="700">GitHub Ephemeral Runner Orchestrator</text>
+  <text x="20" y="60" fill="#6b7280" font-size="12">Per-job, ephemeral GitHub Actions runners on AWS Lambda MicroVMs, triggered by a GitHub webhook</text>
+</svg>

@@ -254,7 +254,11 @@ async function handleRequest(req, res) {
       res.writeHead(200);
       res.end();
     } catch (err) {
-      console.error('Error handling /run:', err);
+      // Never log `err` directly here: a JSON or base64 parse failure can embed fragments of the
+      // run-hook payload — which carries the JIT runner registration credential — in its message
+      // (Node includes a snippet of the offending input in SyntaxError messages). Log only the
+      // error type so the credential can never reach CloudWatch.
+      console.error('Error handling /run:', err && err.name ? err.name : 'unknown error');
       res.writeHead(500);
       res.end();
     }

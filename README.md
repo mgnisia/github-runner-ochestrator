@@ -1,6 +1,23 @@
 # GitHub Ephemeral Runner Orchestrator
 
-An AWS CDK + TypeScript project that receives GitHub webhooks via API Gateway v2 (HTTP API) and validates them using an HMAC-SHA256 signature stored in AWS SSM Parameter Store.
+This project runs **ephemeral, single-use [GitHub Actions self-hosted runners](https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners/about-self-hosted-runners) on [AWS Lambda MicroVMs](https://docs.aws.amazon.com/lambda/latest/dg/microvms-images.html), provisioned on demand by a [GitHub webhook](https://docs.github.com/en/webhooks/about-webhooks).**
+
+When a workflow needs a runner, GitHub sends a [`workflow_job`](https://docs.github.com/en/webhooks/webhook-events-and-payloads#workflow_job) webhook. The orchestrator validates it, and a fresh MicroVM is launched that registers itself with GitHub as a [just-in-time (JIT) runner](https://docs.github.com/en/rest/actions/self-hosted-runners#create-configuration-for-a-just-in-time-runner-for-an-organization), runs exactly one job, and is then destroyed. There are no long-lived runners, no shared state between jobs, and no idle compute — each job gets a clean, isolated [microVM](https://docs.aws.amazon.com/lambda/latest/dg/microvms-images.html). Two runner flavors are available: a plain runner and a Docker-in-Docker runner, selected per job by label.
+
+It is implemented in TypeScript and deployed with the [AWS Cloud Development Kit (CDK) v2](https://docs.aws.amazon.com/cdk/v2/guide/home.html).
+
+## Architecture
+
+The request flows in one direction — from a GitHub webhook through to a launched runner — and the runner then connects back to GitHub to pick up its job:
+
+![High-level architecture: GitHub webhook → API Gateway → Lambda orchestrator → SQS → Lambda worker → Lambda MicroVM](docs/architecture.svg)
+
+1. **[GitHub](https://docs.github.com/en/webhooks/about-webhooks)** sends a [`workflow_job`](https://docs.github.com/en/webhooks/webhook-events-and-payloads#workflow_job) webhook (HMAC-SHA256 signed) when a job is queued.
+2. **[Amazon API Gateway](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api.html)** (HTTP API) exposes the `POST /webhook` endpoint and invokes the orchestrator.
+3. **[AWS Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html) — Orchestrator** verifies the webhook signature, filters for queued `workflow_job` events carrying the required label, and enqueues a runner request. It responds fast so GitHub's webhook delivery never blocks on runner provisioning.
+4. **[Amazon SQS](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/welcome.html)** decouples acceptance from provisioning and provides retries plus a dead-letter queue for failed requests.
+5. **[AWS Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html) — Worker** consumes the queue, mints [JIT runner credentials](https://docs.github.com/en/rest/actions/self-hosted-runners#create-configuration-for-a-just-in-time-runner-for-an-organization) from the GitHub App, and launches the runner.
+6. **[AWS Lambda MicroVM](https://docs.aws.amazon.com/lambda/latest/dg/microvms-images.html)** boots as an ephemeral, isolated runner, registers with GitHub as a JIT self-hosted runner, executes the single workflow job, and self-terminates.
 
 ## Prerequisites
 
@@ -115,7 +132,7 @@ npm test
 npm run synth
 ```
 
-## Architecture
+## Component reference
 
 - **API Gateway v2 (HTTP API)**: Accepts `POST /webhook` from GitHub.
 - **Lambda (Orchestrator)**: Loads the HMAC secret from SSM at cold start, verifies the `X-Hub-Signature-256` header, filters `workflow_job` events for `action == "queued"` and the `lambda-microvms` label, enqueues matching jobs to SQS, and returns `202`. Non-matching events return `200 ignored`. Invalid/missing signature returns `401`. SSM load failure returns `500`.
@@ -290,8 +307,9 @@ arn:{partition}:lambda:{region}:aws:network-connector:aws-network-connector:INTE
 
 ---
 
-> **SECURITY — `encoded_jit_config` logging:** The JIT runner registration credential
-> (`encoded_jit_config`) is currently logged to CloudWatch **only** for the Phase 2 confirmation
-> phase. This logging **must be removed before this stack is used in production**. Removal is
-> tracked in beads issue `github-runner-ochestrator-q1h`. The App private key and installation
-> token are never logged.
+> **SECURITY — credential logging:** Secrets are never written to logs. The webhook HMAC secret,
+> the GitHub App private key, the installation token, and the JIT runner registration credential
+> (`encoded_jit_config`) are all kept out of CloudWatch. Logs carry only non-sensitive metadata
+> (run IDs, runner names, labels, image identifiers, timings). Error paths that touch the
+> credential-bearing run-hook payload log the error *type* only — never the raw error message —
+> so a parse failure cannot echo credential fragments.
