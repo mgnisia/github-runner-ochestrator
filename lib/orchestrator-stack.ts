@@ -36,9 +36,9 @@ export class OrchestratorStack extends Stack {
     const microvmMaxIdleSeconds =
       (this.node.tryGetContext('microvmMaxIdleSeconds') as string | undefined) ?? '900';
     const microvmSuspendedSeconds =
-      (this.node.tryGetContext('microvmSuspendedSeconds') as string | undefined) ?? '1800';
+      (this.node.tryGetContext('microvmSuspendedSeconds') as string | undefined) ?? '3600';
     const microvmMaxDurationSeconds =
-      (this.node.tryGetContext('microvmMaxDurationSeconds') as string | undefined) ?? '1800';
+      (this.node.tryGetContext('microvmMaxDurationSeconds') as string | undefined) ?? '3600';
 
     // ── Phase A: always synthesized ────────────────────────────────────────────
 
