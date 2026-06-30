@@ -6,8 +6,9 @@ beforeAll(() => {
   process.env.RUNNER_GROUP_ID = '42';
 });
 
-test('Phase A: synthesizes always-on infra without MICROVM_IMAGE_ARN', () => {
-  delete process.env.MICROVM_IMAGE_ARN;
+test('Phase A: synthesizes always-on infra without MICROVM_IMAGE_ARN_DOCKER / NO_DOCKER', () => {
+  delete process.env.MICROVM_IMAGE_ARN_DOCKER;
+  delete process.env.MICROVM_IMAGE_ARN_NO_DOCKER;
 
   const app = new App();
   const stack = new OrchestratorStack(app, 'TestStack');
@@ -34,8 +35,9 @@ test('Phase A: synthesizes always-on infra without MICROVM_IMAGE_ARN', () => {
   template.hasOutput('MicrovmCodeBucketName', {});
 });
 
-test('Phase B: synthesizes receiver + worker Lambdas, SQS queues, and API Gateway when MICROVM_IMAGE_ARN is set', () => {
-  process.env.MICROVM_IMAGE_ARN = 'arn:aws:lambda:eu-west-1:123456789012:microvm-image:github-runner';
+test('Phase B: synthesizes receiver + worker Lambdas, SQS queues, and API Gateway when both image ARNs are set', () => {
+  process.env.MICROVM_IMAGE_ARN_DOCKER = 'arn:aws:lambda:eu-west-1:123456789012:microvm-image:github-runner-docker';
+  process.env.MICROVM_IMAGE_ARN_NO_DOCKER = 'arn:aws:lambda:eu-west-1:123456789012:microvm-image:github-runner-no-docker';
 
   try {
     const app = new App();
@@ -98,7 +100,9 @@ test('Phase B: synthesizes receiver + worker Lambdas, SQS queues, and API Gatewa
           GITHUB_APP_CREDENTIALS_PARAM: '/github-runner-orchestrator/app-credentials',
           RUNNER_GROUP_ID: '42',
           REQUIRED_RUNNER_LABEL: 'lambda-microvms',
-          MICROVM_IMAGE_IDENTIFIER: 'arn:aws:lambda:eu-west-1:123456789012:microvm-image:github-runner',
+          MICROVM_IMAGE_IDENTIFIER_DOCKER: 'arn:aws:lambda:eu-west-1:123456789012:microvm-image:github-runner-docker',
+          MICROVM_IMAGE_IDENTIFIER_NO_DOCKER: 'arn:aws:lambda:eu-west-1:123456789012:microvm-image:github-runner-no-docker',
+          DOCKER_RUNNER_LABEL: 'docker',
         }),
       },
       Timeout: 25,
@@ -155,6 +159,7 @@ test('Phase B: synthesizes receiver + worker Lambdas, SQS queues, and API Gatewa
     template.hasOutput('QueueUrl', {});
     template.hasOutput('DlqUrl', {});
   } finally {
-    delete process.env.MICROVM_IMAGE_ARN;
+    delete process.env.MICROVM_IMAGE_ARN_DOCKER;
+    delete process.env.MICROVM_IMAGE_ARN_NO_DOCKER;
   }
 });

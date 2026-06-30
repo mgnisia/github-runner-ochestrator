@@ -7,7 +7,8 @@ import {
   mintAppJwt,
   parseAppCredentials,
 } from './github';
-import { buildMicrovmConfig, runMicrovmWithRetry } from './microvms';
+import { buildMicrovmConfig, selectImageIdentifier, runMicrovmWithRetry } from './microvms';
+import type { MicrovmLaunchConfig } from './microvms';
 import type { RunnerRequestMessage } from './queue';
 
 const APP_CREDENTIALS_PARAM = process.env.GITHUB_APP_CREDENTIALS_PARAM;
@@ -89,7 +90,11 @@ export const handler: SQSHandler = async (event) => {
 
     stage = 'runMicrovmWithRetry';
     t = Date.now();
-    const vm = await runMicrovmWithRetry(microvmConfig, jit.encoded_jit_config, {
+    const imageIdentifier = selectImageIdentifier(labels, microvmConfig.images, microvmConfig.dockerLabel);
+    const hasDockerLabel = labels.includes(microvmConfig.dockerLabel);
+    console.log(`[${runId}] Launching ${hasDockerLabel ? 'docker' : 'no-docker'} image: ${imageIdentifier}`);
+    const launchConfig: MicrovmLaunchConfig = { ...microvmConfig.base, imageIdentifier };
+    const vm = await runMicrovmWithRetry(launchConfig, jit.encoded_jit_config, {
       attempts: 3,
       delayMs: 5000,
     });
