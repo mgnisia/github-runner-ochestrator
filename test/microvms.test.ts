@@ -56,8 +56,8 @@ describe('buildMicrovmConfig', () => {
     expect(result.base.executionRoleArn).toBe('arn:aws:iam::123456789012:role/MicrovmExecRole');
     expect(result.base.ingressNetworkConnectors).toEqual(['arn:ingress']);
     expect(result.base.egressNetworkConnectors).toEqual(['arn:egress']);
-    expect(result.base.maxIdleDurationSeconds).toBe(900);
-    expect(result.base.suspendedDurationSeconds).toBe(3600);
+    expect(result.base.maxIdleDurationSeconds).toBe(1800);
+    expect(result.base.suspendedDurationSeconds).toBe(10);
     expect(result.base.maximumDurationInSeconds).toBe(3600);
   });
 
