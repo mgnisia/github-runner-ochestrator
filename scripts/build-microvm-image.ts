@@ -1,10 +1,15 @@
 /**
  * build-microvm-image.ts
  *
- * Zips microvm/, uploads to S3, and creates or updates the `github-runner` MicroVM image,
- * then polls until CREATED/UPDATED and writes the ARN to .env.
+ * Zips microvm/ for a given flavor, uploads to S3, creates or updates the
+ * flavor-specific MicroVM image, polls until CREATED/UPDATED, deletes old
+ * image versions, and writes the ARN to .env.
  *
- * Run via: npm run build:image
+ * Run via:
+ *   npm run build:image:docker      (github-runner-docker)
+ *   npm run build:image:no-docker   (github-runner-no-docker)
+ *   npm run build:images            (both, sequentially)
+ *
  * Prerequisites: npm run deploy (produces output.json with stack outputs)
  */
 
@@ -16,30 +21,63 @@ import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import {
   LambdaMicrovmsClient,
   ListMicrovmImagesCommand,
+  ListMicrovmImageVersionsCommand,
+  DeleteMicrovmImageVersionCommand,
   CreateMicrovmImageCommand,
   UpdateMicrovmImageCommand,
   GetMicrovmImageCommand,
+  GetMicrovmImageCommandOutput,
   Capability,
 } from '@aws-sdk/client-lambda-microvms';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const STACK_NAME = 'GithubRunnerOrchestratorStack';
-const IMAGE_NAME = 'github-runner';
 const POLL_INTERVAL_MS = 15_000;
 const POLL_TIMEOUT_MS = 12 * 60 * 1000; // 12 minutes
+
+// ── Flavor configuration ─────────────────────────────────────────────────────
+
+type Flavor = 'docker' | 'no-docker';
+
+interface FlavorConfig {
+  imageName: string;
+  dockerfile: string;
+  envKey: string;
+  capabilities: Capability[] | undefined;
+}
+
+const FLAVORS: Record<Flavor, FlavorConfig> = {
+  docker: {
+    imageName: 'github-runner-docker',
+    dockerfile: 'Dockerfile.docker',
+    envKey: 'MICROVM_IMAGE_ARN_DOCKER',
+    // Grant elevated Linux capabilities inside the MicroVM (the only supported value is ["ALL"]).
+    // Required for the Docker-in-Docker daemon started in entrypoint.sh, which needs to mount
+    // filesystems and create network namespaces. Capabilities apply within the VM isolation
+    // boundary only. See https://docs.aws.amazon.com/lambda/latest/dg/microvms-images.html
+    capabilities: [Capability.ALL],
+  },
+  'no-docker': {
+    imageName: 'github-runner-no-docker',
+    dockerfile: 'Dockerfile.base',
+    envKey: 'MICROVM_IMAGE_ARN_NO_DOCKER',
+    // No elevated capabilities needed for the base (non-Docker) runner.
+    capabilities: undefined,
+  },
+};
 
 // ── Pure helpers (exported for unit tests) ───────────────────────────────────
 
 /**
- * Upserts MICROVM_IMAGE_ARN in a .env file's string contents.
+ * Upserts an env key/value pair in a .env file's string contents.
  * - If the key already exists, replaces that line in-place.
  * - Otherwise appends the key to the end (with a leading newline if needed).
  * - Preserves all other lines exactly.
  */
-export function upsertEnvArn(existingContents: string, arn: string): string {
-  const line = `MICROVM_IMAGE_ARN=${arn}`;
-  const keyPattern = /^MICROVM_IMAGE_ARN=.*$/m;
+export function upsertEnvArn(existingContents: string, key: string, arn: string): string {
+  const line = `${key}=${arn}`;
+  const keyPattern = new RegExp(`^${escapeRegex(key)}=.*$`, 'm');
   if (keyPattern.test(existingContents)) {
     return existingContents.replace(keyPattern, line);
   }
@@ -47,6 +85,10 @@ export function upsertEnvArn(existingContents: string, arn: string): string {
     return existingContents + line + '\n';
   }
   return existingContents + '\n' + line + '\n';
+}
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 /**
@@ -59,6 +101,25 @@ export function findExactImage(
   targetName: string
 ): { name?: string; imageArn?: string } | undefined {
   return items.find((item) => item.name === targetName);
+}
+
+/**
+ * Returns the imageVersion strings that should be deleted, given a set of
+ * version summaries and the version to keep.
+ * - Items whose imageVersion is undefined are silently skipped.
+ * - If keepVersion is falsy, returns [] (delete nothing).
+ */
+export function selectVersionsToDelete(
+  versions: { imageVersion?: string }[],
+  keepVersion: string
+): string[] {
+  if (!keepVersion) {
+    return [];
+  }
+  return versions
+    .filter((v): v is { imageVersion: string } => v.imageVersion !== undefined)
+    .map((v) => v.imageVersion)
+    .filter((v) => v !== keepVersion);
 }
 
 // ── Main script ──────────────────────────────────────────────────────────────
@@ -109,19 +170,37 @@ async function readOutputs(): Promise<{
   };
 }
 
-function zipMicrovm(): string {
+function zipMicrovm(dockerfile: string): string {
   const microvmDir = path.join(__dirname, '..', 'microvm');
+  const stagingDir = fs.mkdtempSync(path.join(os.tmpdir(), 'microvm-stage-'));
   const tmpZipPath = path.join(os.tmpdir(), 'app.zip');
 
-  console.log(`Zipping microvm/ into ${tmpZipPath} ...`);
+  console.log(`Staging microvm/ with ${dockerfile} into ${stagingDir} ...`);
 
-  // Explicit file list mirrors the proven deploy.sh approach: prevents .DS_Store and
-  // self-referential app.zip leaks (same list as the old lib/orchestrator-stack.ts bundler).
+  // Copy explicit allow-list of files into the staging dir, renaming the
+  // chosen Dockerfile to 'Dockerfile'. This prevents .DS_Store / app.zip
+  // leaks and supports per-flavor Dockerfile selection without relying on
+  // zip's inability to rename entries.
+  const filesToCopy: Array<[string, string]> = [
+    [path.join(microvmDir, dockerfile), path.join(stagingDir, 'Dockerfile')],
+    [path.join(microvmDir, 'app.js'), path.join(stagingDir, 'app.js')],
+    [path.join(microvmDir, 'entrypoint.sh'), path.join(stagingDir, 'entrypoint.sh')],
+    [path.join(microvmDir, 'package.json'), path.join(stagingDir, 'package.json')],
+  ];
+  for (const [src, dst] of filesToCopy) {
+    fs.copyFileSync(src, dst);
+  }
+
+  console.log(`Zipping staged files into ${tmpZipPath} ...`);
+
   const result = spawnSync(
     'zip',
     ['-r', tmpZipPath, 'Dockerfile', 'app.js', 'entrypoint.sh', 'package.json'],
-    { cwd: microvmDir, stdio: 'inherit' }
+    { cwd: stagingDir, stdio: 'inherit' }
   );
+
+  // Clean up staging dir regardless of zip outcome
+  fs.rmSync(stagingDir, { recursive: true, force: true });
 
   if (result.status !== 0) {
     throw new Error(`zip exited with status ${result.status ?? '(unknown)'}`);
@@ -146,26 +225,28 @@ async function uploadToS3(bucketName: string, region: string, zipPath: string): 
 }
 
 async function findExistingImage(
-  microvmsClient: LambdaMicrovmsClient
+  microvmsClient: LambdaMicrovmsClient,
+  imageName: string
 ): Promise<{ name?: string; imageArn?: string } | undefined> {
-  console.log(`Checking for existing MicroVM image "${IMAGE_NAME}" ...`);
+  console.log(`Checking for existing MicroVM image "${imageName}" ...`);
 
   const allItems: { name?: string; imageArn?: string }[] = [];
   let nextToken: string | undefined;
 
   do {
     const response = await microvmsClient.send(
-      new ListMicrovmImagesCommand({ nameFilter: IMAGE_NAME, nextToken })
+      new ListMicrovmImagesCommand({ nameFilter: imageName, nextToken })
     );
     allItems.push(...(response.items ?? []));
     nextToken = response.nextToken;
   } while (nextToken);
 
-  return findExactImage(allItems, IMAGE_NAME);
+  return findExactImage(allItems, imageName);
 }
 
 async function createOrUpdate(
   microvmsClient: LambdaMicrovmsClient,
+  flavor: FlavorConfig,
   existing: { name?: string; imageArn?: string } | undefined,
   params: {
     codeArtifactUri: string;
@@ -177,11 +258,11 @@ async function createOrUpdate(
     codeArtifact: { uri: params.codeArtifactUri },
     baseImageArn: params.baseImageArn,
     buildRoleArn: params.buildRoleArn,
-    // Grant elevated Linux capabilities inside the MicroVM (the only supported value is ["ALL"]).
-    // Required for the Docker-in-Docker daemon started in entrypoint.sh, which needs to mount
-    // filesystems and create network namespaces. Capabilities apply within the VM isolation
-    // boundary only. See https://docs.aws.amazon.com/lambda/latest/dg/microvms-images.html
-    additionalOsCapabilities: [Capability.ALL],
+    // Only include additionalOsCapabilities when the flavor requires them.
+    // The no-docker flavor omits this field entirely.
+    ...(flavor.capabilities !== undefined
+      ? { additionalOsCapabilities: flavor.capabilities }
+      : {}),
     resources: [{
       minimumMemoryInMiB: 4096,
     }],
@@ -201,9 +282,9 @@ async function createOrUpdate(
   };
 
   if (!existing) {
-    console.log(`Creating new MicroVM image "${IMAGE_NAME}" ...`);
+    console.log(`Creating new MicroVM image "${flavor.imageName}" ...`);
     const response = await microvmsClient.send(
-      new CreateMicrovmImageCommand({ name: IMAGE_NAME, ...sharedInput })
+      new CreateMicrovmImageCommand({ name: flavor.imageName, ...sharedInput })
     );
     if (!response.imageArn) {
       throw new Error('CreateMicrovmImageCommand returned no imageArn');
@@ -211,7 +292,7 @@ async function createOrUpdate(
     console.log(`Create initiated. imageArn: ${response.imageArn}`);
     return response.imageArn;
   } else {
-    console.log(`Updating existing MicroVM image "${IMAGE_NAME}" (${existing.imageArn}) ...`);
+    console.log(`Updating existing MicroVM image "${flavor.imageName}" (${existing.imageArn}) ...`);
     const response = await microvmsClient.send(
       new UpdateMicrovmImageCommand({ imageIdentifier: existing.imageArn!, ...sharedInput })
     );
@@ -223,7 +304,10 @@ async function createOrUpdate(
   }
 }
 
-async function pollUntilReady(microvmsClient: LambdaMicrovmsClient, imageArn: string): Promise<void> {
+async function pollUntilReady(
+  microvmsClient: LambdaMicrovmsClient,
+  imageArn: string
+): Promise<GetMicrovmImageCommandOutput> {
   const deadline = Date.now() + POLL_TIMEOUT_MS;
   const terminalSuccess = new Set(['CREATED', 'UPDATED']);
   const terminalFailure = new Set(['CREATE_FAILED', 'UPDATE_FAILED']);
@@ -238,7 +322,7 @@ async function pollUntilReady(microvmsClient: LambdaMicrovmsClient, imageArn: st
     console.log(`  Image state: ${state}`);
 
     if (terminalSuccess.has(state)) {
-      return;
+      return response;
     }
     if (terminalFailure.has(state)) {
       throw new Error(`MicroVM image build failed with state: ${state}`);
@@ -253,17 +337,61 @@ async function pollUntilReady(microvmsClient: LambdaMicrovmsClient, imageArn: st
   );
 }
 
-function writeEnvFile(imageArn: string): void {
+async function deleteOldImageVersions(
+  microvmsClient: LambdaMicrovmsClient,
+  imageIdentifier: string,
+  keepVersion: string
+): Promise<void> {
+  if (!keepVersion) {
+    console.log('Warning: latestActiveImageVersion is missing — skipping old-version cleanup.');
+    return;
+  }
+
+  const allVersions: { imageVersion?: string }[] = [];
+  let nextToken: string | undefined;
+
+  do {
+    const response = await microvmsClient.send(
+      new ListMicrovmImageVersionsCommand({ imageIdentifier, nextToken })
+    );
+    allVersions.push(...(response.items ?? []));
+    nextToken = response.nextToken;
+  } while (nextToken);
+
+  const toDelete = selectVersionsToDelete(allVersions, keepVersion);
+
+  for (const imageVersion of toDelete) {
+    console.log(`  Deleting old image version: ${imageVersion}`);
+    await microvmsClient.send(
+      new DeleteMicrovmImageVersionCommand({ imageIdentifier, imageVersion })
+    );
+  }
+
+  console.log(`Deleted ${toDelete.length} old image version(s).`);
+}
+
+function writeEnvFile(envKey: string, imageArn: string): void {
   const envPath = path.join(__dirname, '..', '.env');
   const existing = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf8') : '';
-  const updated = upsertEnvArn(existing, imageArn);
+  const updated = upsertEnvArn(existing, envKey, imageArn);
   fs.writeFileSync(envPath, updated, 'utf8');
-  console.log(`\nMICROVM_IMAGE_ARN=${imageArn}`);
+  console.log(`\n${envKey}=${imageArn}`);
   console.log('Image ready. Now run `npm run deploy` to deploy the orchestrator.');
 }
 
 async function main(): Promise<void> {
-  console.log('=== build-microvm-image ===');
+  // Validate flavor argument
+  const flavorArg = process.argv[2];
+  const validFlavors = Object.keys(FLAVORS).join(', ');
+  if (!flavorArg || !(flavorArg in FLAVORS)) {
+    console.error(`Error: missing or invalid flavor argument: ${JSON.stringify(flavorArg ?? '')}`);
+    console.error(`Usage: ts-node scripts/build-microvm-image.ts <flavor>`);
+    console.error(`Valid flavors: ${validFlavors}`);
+    process.exit(1);
+  }
+  const flavor = FLAVORS[flavorArg as Flavor];
+
+  console.log(`=== build-microvm-image [${flavorArg}] ===`);
 
   // Step 1: read CDK outputs
   console.log('Reading CDK outputs from output.json ...');
@@ -274,8 +402,8 @@ async function main(): Promise<void> {
   console.log(`  BuildRoleArn:        ${MicrovmBuildRoleArn}`);
   console.log(`  BaseImageArn:        ${MicrovmBaseImageArn}`);
 
-  // Step 2: zip microvm/
-  const zipPath = zipMicrovm();
+  // Step 2: zip microvm/ using the flavor's Dockerfile
+  const zipPath = zipMicrovm(flavor.dockerfile);
 
   // Step 3: upload to S3
   await uploadToS3(MicrovmCodeBucketName, Region, zipPath);
@@ -283,23 +411,27 @@ async function main(): Promise<void> {
   // Step 4-6: detect, create/update, poll
   const microvmsClient = new LambdaMicrovmsClient({ region: Region });
 
-  const existing = await findExistingImage(microvmsClient);
+  const existing = await findExistingImage(microvmsClient, flavor.imageName);
   if (existing) {
     console.log(`Found existing image: ${existing.imageArn}`);
   } else {
     console.log('No existing image found — will create.');
   }
 
-  const imageArn = await createOrUpdate(microvmsClient, existing, {
+  const imageArn = await createOrUpdate(microvmsClient, flavor, existing, {
     codeArtifactUri: `s3://${MicrovmCodeBucketName}/app.zip`,
     baseImageArn: MicrovmBaseImageArn,
     buildRoleArn: MicrovmBuildRoleArn,
   });
 
-  await pollUntilReady(microvmsClient, imageArn);
+  const pollResult = await pollUntilReady(microvmsClient, imageArn);
 
-  // Step 7: write .env
-  writeEnvFile(imageArn);
+  // Step 7: delete old image versions, keeping only the one just built
+  const latestActiveImageVersion = pollResult.latestActiveImageVersion ?? '';
+  await deleteOldImageVersions(microvmsClient, imageArn, latestActiveImageVersion);
+
+  // Step 8: write .env
+  writeEnvFile(flavor.envKey, imageArn);
 }
 
 // Guard: only run main when executed directly (not when imported by tests)
