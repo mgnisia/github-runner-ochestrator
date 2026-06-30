@@ -33,8 +33,8 @@ const CONFIG: MicrovmLaunchConfig = {
   ingressNetworkConnectors: ['ingress'],
   egressNetworkConnectors: ['egress'],
   maxIdleDurationSeconds: 900,
-  suspendedDurationSeconds: 1800,
-  maximumDurationInSeconds: 1800,
+  suspendedDurationSeconds: 3600,
+  maximumDurationInSeconds: 3600,
 };
 
 describe('runMicrovmWithRetry', () => {

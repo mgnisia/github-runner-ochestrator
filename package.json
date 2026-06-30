@@ -7,7 +7,9 @@
     "test": "jest",
     "synth": "cdk synth",
     "deploy": "cdk deploy --outputs-file output.json",
-    "build:image": "ts-node scripts/build-microvm-image.ts"
+    "build:image:docker": "ts-node scripts/build-microvm-image.ts docker",
+    "build:image:no-docker": "ts-node scripts/build-microvm-image.ts no-docker",
+    "build:images": "npm run build:image:docker && npm run build:image:no-docker"
   },
   "dependencies": {
     "@aws-sdk/client-lambda-microvms": "^3.1075.0",

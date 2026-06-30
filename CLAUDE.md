@@ -58,7 +58,9 @@ npm run build      # type-check (tsc --noEmit)
 npm test           # run jest unit tests
 npm run synth      # cdk synth
 npm run deploy     # cdk deploy --outputs-file output.json (infra first; orchestrator once MICROVM_IMAGE_ARN is set)
-npm run build:image  # zip+upload microvm/, create/update the MicroVM image, write MICROVM_IMAGE_ARN to .env
+npm run build:image:docker     # build github-runner-docker image, write MICROVM_IMAGE_ARN_DOCKER to .env
+npm run build:image:no-docker  # build github-runner-no-docker image, write MICROVM_IMAGE_ARN_NO_DOCKER to .env
+npm run build:images           # build both images sequentially (required before npm run deploy)
 ```
 
 ## Architecture Overview

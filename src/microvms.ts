@@ -15,29 +15,52 @@ export interface MicrovmLaunchConfig {
   maximumDurationInSeconds: number;
 }
 
+export interface MicrovmConfig {
+  base: Omit<MicrovmLaunchConfig, 'imageIdentifier'>;
+  images: { docker: string; noDocker: string };
+  dockerLabel: string;
+}
+
 export interface RunMicrovmResult {
   microvmId: string;
   endpoint: string;
 }
 
-/** Build a MicrovmLaunchConfig from environment variables. Returns an error string if misconfigured. */
-export function buildMicrovmConfig(): MicrovmLaunchConfig | string {
-  const imageIdentifier = process.env.MICROVM_IMAGE_IDENTIFIER;
+/**
+ * Select the correct MicroVM image identifier based on the job's labels.
+ * Defaults to the no-docker image; opt-in by including the docker label.
+ */
+export function selectImageIdentifier(
+  labels: string[],
+  images: { docker: string; noDocker: string },
+  dockerLabel: string,
+): string {
+  return labels.includes(dockerLabel) ? images.docker : images.noDocker;
+}
+
+/** Build a MicrovmConfig from environment variables. Returns an error string if misconfigured. */
+export function buildMicrovmConfig(): MicrovmConfig | string {
+  const dockerImageIdentifier = process.env.MICROVM_IMAGE_IDENTIFIER_DOCKER;
+  const noDockerImageIdentifier = process.env.MICROVM_IMAGE_IDENTIFIER_NO_DOCKER;
   const executionRoleArn = process.env.MICROVM_EXECUTION_ROLE_ARN;
   const ingressRaw = process.env.MICROVM_INGRESS_NETWORK_CONNECTORS;
   const egressRaw = process.env.MICROVM_EGRESS_NETWORK_CONNECTORS;
-  if (!imageIdentifier) return 'MICROVM_IMAGE_IDENTIFIER env var is not set';
+  if (!dockerImageIdentifier) return 'MICROVM_IMAGE_IDENTIFIER_DOCKER env var is not set';
+  if (!noDockerImageIdentifier) return 'MICROVM_IMAGE_IDENTIFIER_NO_DOCKER env var is not set';
   if (!executionRoleArn) return 'MICROVM_EXECUTION_ROLE_ARN env var is not set';
   if (!ingressRaw) return 'MICROVM_INGRESS_NETWORK_CONNECTORS env var is not set';
   if (!egressRaw) return 'MICROVM_EGRESS_NETWORK_CONNECTORS env var is not set';
   return {
-    imageIdentifier,
-    executionRoleArn,
-    ingressNetworkConnectors: ingressRaw.split(',').map((s) => s.trim()),
-    egressNetworkConnectors: egressRaw.split(',').map((s) => s.trim()),
-    maxIdleDurationSeconds: Number(process.env.MICROVM_MAX_IDLE_SECONDS ?? '900'),
-    suspendedDurationSeconds: Number(process.env.MICROVM_SUSPENDED_SECONDS ?? '3600'),
-    maximumDurationInSeconds: Number(process.env.MICROVM_MAX_DURATION_SECONDS ?? '3600'),
+    base: {
+      executionRoleArn,
+      ingressNetworkConnectors: ingressRaw.split(',').map((s) => s.trim()),
+      egressNetworkConnectors: egressRaw.split(',').map((s) => s.trim()),
+      maxIdleDurationSeconds: Number(process.env.MICROVM_MAX_IDLE_SECONDS ?? '900'),
+      suspendedDurationSeconds: Number(process.env.MICROVM_SUSPENDED_SECONDS ?? '3600'),
+      maximumDurationInSeconds: Number(process.env.MICROVM_MAX_DURATION_SECONDS ?? '3600'),
+    },
+    images: { docker: dockerImageIdentifier, noDocker: noDockerImageIdentifier },
+    dockerLabel: process.env.DOCKER_RUNNER_LABEL ?? 'docker',
   };
 }
 

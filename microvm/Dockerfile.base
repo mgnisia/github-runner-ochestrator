@@ -4,25 +4,12 @@ ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-      ca-certificates curl gnupg tar gzip net-tools git jq dnsmasq unzip && \
+      ca-certificates curl gnupg tar gzip net-tools git jq unzip && \
     rm -rf /var/lib/apt/lists/*
 
 # Node.js 22 (NodeSource — Ubuntu's repos only ship Node 18)
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
-    rm -rf /var/lib/apt/lists/*
-
-# Docker engine (daemon + CLI + buildx) for jobs that bundle assets via Docker, e.g. CDK's
-# aws-lambda-python-alpha PythonFunction. The daemon is started in entrypoint.sh at job time
-# (Docker-in-Docker); there is no init system in the microVM to start it for us.
-RUN install -m 0755 -d /etc/apt/keyrings && \
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc && \
-    chmod a+r /etc/apt/keyrings/docker.asc && \
-    echo "deb [arch=arm64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable" \
-      > /etc/apt/sources.list.d/docker.list && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends \
-      docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin iptables && \
     rm -rf /var/lib/apt/lists/*
 
 # AWS CLI v2 — jobs commonly invoke `aws` (it is not in the Ubuntu base image). ARM64 build,

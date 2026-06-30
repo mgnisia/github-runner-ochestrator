@@ -30,12 +30,15 @@ export class OrchestratorStack extends Stack {
     const requiredRunnerLabel =
       (this.node.tryGetContext('requiredRunnerLabel') as string | undefined) ?? 'lambda-microvms';
 
+    const dockerRunnerLabel =
+      (this.node.tryGetContext('dockerRunnerLabel') as string | undefined) ?? 'docker';
+
     const microvmMaxIdleSeconds =
       (this.node.tryGetContext('microvmMaxIdleSeconds') as string | undefined) ?? '900';
     const microvmSuspendedSeconds =
-      (this.node.tryGetContext('microvmSuspendedSeconds') as string | undefined) ?? '1800';
+      (this.node.tryGetContext('microvmSuspendedSeconds') as string | undefined) ?? '3600';
     const microvmMaxDurationSeconds =
-      (this.node.tryGetContext('microvmMaxDurationSeconds') as string | undefined) ?? '1800';
+      (this.node.tryGetContext('microvmMaxDurationSeconds') as string | undefined) ?? '3600';
 
     // ── Phase A: always synthesized ────────────────────────────────────────────
 
@@ -65,9 +68,10 @@ export class OrchestratorStack extends Stack {
     });
     new CfnOutput(this, 'Region', { value: this.region });
 
-    // ── Phase B: synthesized only when MICROVM_IMAGE_ARN is set ───────────────
-    if (process.env.MICROVM_IMAGE_ARN) {
-      const microvmImageArn = process.env.MICROVM_IMAGE_ARN;
+    // ── Phase B: synthesized only when BOTH image ARNs are set ───────────────
+    if (process.env.MICROVM_IMAGE_ARN_DOCKER && process.env.MICROVM_IMAGE_ARN_NO_DOCKER) {
+      const dockerArn = process.env.MICROVM_IMAGE_ARN_DOCKER;
+      const noDockerArn = process.env.MICROVM_IMAGE_ARN_NO_DOCKER;
       const runnerGroupId = requireEnv('RUNNER_GROUP_ID');
 
       // Network connector ARNs derived from stack region/partition — no context overrides needed.
@@ -83,7 +87,7 @@ export class OrchestratorStack extends Stack {
       executionRole.addToPolicy(
         new iam.PolicyStatement({
           actions: ['lambda:TerminateMicrovm'],
-          resources: [microvmImageArn],
+          resources: [dockerArn, noDockerArn],
         })
       );
       executionRole.addToPolicy(
@@ -157,7 +161,9 @@ export class OrchestratorStack extends Stack {
           GITHUB_APP_CREDENTIALS_PARAM: appCredentialsParamName,
           RUNNER_GROUP_ID: runnerGroupId,
           REQUIRED_RUNNER_LABEL: requiredRunnerLabel,
-          MICROVM_IMAGE_IDENTIFIER: microvmImageArn,
+          MICROVM_IMAGE_IDENTIFIER_DOCKER: dockerArn,
+          MICROVM_IMAGE_IDENTIFIER_NO_DOCKER: noDockerArn,
+          DOCKER_RUNNER_LABEL: dockerRunnerLabel,
           MICROVM_EXECUTION_ROLE_ARN: executionRole.roleArn,
           MICROVM_INGRESS_NETWORK_CONNECTORS: ingressConnectorArn,
           MICROVM_EGRESS_NETWORK_CONNECTORS: egressConnectorArn,
@@ -173,7 +179,7 @@ export class OrchestratorStack extends Stack {
       worker.addToRolePolicy(
         new iam.PolicyStatement({
           actions: ['lambda:RunMicrovm'],
-          resources: [microvmImageArn],
+          resources: [dockerArn, noDockerArn],
         })
       );
       worker.addToRolePolicy(
@@ -202,7 +208,8 @@ export class OrchestratorStack extends Stack {
       new CfnOutput(this, 'WebhookUrl', { value: `${httpApi.apiEndpoint}/webhook` });
       new CfnOutput(this, 'WebhookSecretParamName', { value: parameterName });
       new CfnOutput(this, 'AppCredentialsParamName', { value: appCredentialsParamName });
-      new CfnOutput(this, 'MicrovmImageArn', { value: microvmImageArn });
+      new CfnOutput(this, 'MicrovmImageArnDocker', { value: dockerArn });
+      new CfnOutput(this, 'MicrovmImageArnNoDocker', { value: noDockerArn });
       new CfnOutput(this, 'QueueUrl', { value: queue.queueUrl });
       new CfnOutput(this, 'DlqUrl', { value: dlq.queueUrl });
     }
