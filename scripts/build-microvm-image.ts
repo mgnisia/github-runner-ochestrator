@@ -270,11 +270,12 @@ async function createOrUpdate(
       port: 9000,
       microvmImageHooks: {
         ready: 'ENABLED' as const,
-        // Build-time only (not job runtime); sized to cover dockerd becoming ready
-        // (≤50s) plus the SAM base image pull warmed into the snapshot (≤120s), with
-        // headroom to spare. See microvm/app.js for DOCKER_READY_DEADLINE_MS and
-        // PREWARM_DEADLINE_MS constants that must fit within this budget.
-        readyTimeoutInSeconds: 180,
+        // Build-time only (not job runtime); sized to cover dockerd becoming ready (≤50s) +
+        // SAM base image pull (~24s) + uv bundling image build (~40s arm64-emulated) with
+        // generous headroom. 240s gives ~126s slack over the ~114s practical ceiling.
+        // The SDK type defines this as `number` with no documented maximum; revisit if the
+        // API rejects 240. See microvm/app.js DOCKER_READY_DEADLINE_MS + PREWARM_DEADLINE_MS.
+        readyTimeoutInSeconds: 240,
       },
       microvmHooks: {
         run: 'ENABLED' as const,

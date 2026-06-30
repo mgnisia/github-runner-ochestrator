@@ -1,5 +1,8 @@
 // Lambda MicroVM lifecycle hook server — listens on port 8080 (catch-all) and 9000 (all hooks)
 const http = require('http');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const { spawn, execFile } = require('child_process');
 const zlib = require('zlib');
 const { LambdaMicrovmsClient, TerminateMicrovmCommand } = require('@aws-sdk/client-lambda-microvms');
@@ -25,51 +28,127 @@ const HAS_DOCKER = process.env.RUNNER_HAS_DOCKER === '1';
 let dockerState = HAS_DOCKER ? 'starting' : 'ready'; // 'starting' | 'ready' | 'failed'
 const DOCKER_READY_DEADLINE_MS = 50_000; // stay within the readyTimeoutInSeconds build hook
 
-// ── SAM base image prewarm (snapshot-warmed) ──────────────────────────────────
-// Pulling the SAM bundling base image BEFORE /ready returns 200 ensures it lands in the MicroVM
-// snapshot layer and is already present in dockerd's image cache on every restored run. This
-// eliminates the ~24s cold pull that `cdk synth` (aws-news/backend) paid on every job.
+// ── SAM base image + uv bundling image prewarm (snapshot-warmed) ─────────────
+// Pulling the SAM bundling base image AND building the uv bundling image BEFORE /ready returns
+// 200 ensures both land in the MicroVM snapshot and are available cache-hit-free on every
+// restored run. This eliminates:
+//   • ~24s cold SAM pull that `cdk synth` (aws-news/backend) paid on every job (Phase 1).
+//   • ~30s `pip install uv==0.11.21` layer that CDK's DockerImage.fromBuild paid on every synth.
 //
 // DIGEST PIN: The digest below must match the base image used by the `uv_python_lambda` CDK
 // bundling image in the aws-news/backend repo. Pinning by digest guarantees the pre-pull is a
 // cache hit at synth time — Docker skips the network round-trip when the manifest is already
-// local. A digest MISMATCH is benign (challenge C2): the snapshot will simply contain a
-// different layer than the synth expects, and cdk synth will pull its required digest fresh, just
-// as it did before this prewarm. Mismatches waste snapshot space but never break builds.
+// local. A digest MISMATCH is benign: the snapshot will simply contain a different layer than
+// the synth expects, and cdk synth will pull its required digest fresh, just as it did before
+// this prewarm. Mismatches waste snapshot space but never break builds.
 // Update this constant whenever aws-news/backend bumps its SAM base image.
 const SAM_BASE_IMAGE = 'public.ecr.aws/sam/build-python3.13@sha256:caa464dc2628d5e9e87936142b571d3cbd3c5cc3a64cde9471963bfa5c54d2c8';
 
-// 'pending' while pull is in flight, 'done' on success, 'failed' on error/timeout.
+// The uv version to pre-bake. Must match [tool.uv] required-version in aws-news/backend's
+// pyproject.toml (currently 0.11.21). A VERSION MISMATCH is benign: CDK synth will build
+// its own pinned version (~30s), which is no worse than before this prewarm. It never breaks
+// builds. Update this when aws-news/backend bumps its required-version. Mirrors the SAM-digest
+// drift note above.
+const UV_VERSION = '0.11.21';
+
+// The tag CDK passes as --build-arg IMAGE when building the uv bundling image. Building FROM
+// this tag resolves locally to the already-pulled SAM_BASE_IMAGE digest above, giving the same
+// parent image ID that CDK's DockerImage.fromBuild uses — ensuring the layer cache key matches.
+const BUNDLING_IMAGE_REF = 'public.ecr.aws/sam/build-python3.13:latest';
+
+// Vendored verbatim from uv_python_lambda@0.0.7/resources/Dockerfile.
+// DRIFT RISK: If uv_python_lambda bumps its Dockerfile (new layers, different RUN) this copy
+// diverges and the prebaked layer may not match CDK's build — producing a cache miss instead
+// of the expected DONE 0.0s. A mismatch is benign: the synth re-runs the ~30s build rather
+// than getting a cache hit. Update this when upgrading uv_python_lambda in aws-news/backend.
+const UV_BUNDLING_DOCKERFILE = [
+  'ARG PYTHON_VERSION=3.7',
+  'ARG IMAGE=public.ecr.aws/sam/build-python${PYTHON_VERSION}',
+  'FROM $IMAGE',
+  'ARG PIP_INDEX_URL',
+  'ARG PIP_EXTRA_INDEX_URL',
+  'ARG HTTPS_PROXY',
+  'ARG UV_VERSION=0.4.20',
+  'ENV PIP_CACHE_DIR=/tmp/pip-cache',
+  'ENV UV_CACHE_DIR=/tmp/uv-cache',
+  'RUN mkdir /tmp/pip-cache && \\',
+  '    chmod -R 777 /tmp/pip-cache && \\',
+  '    pip install uv==$UV_VERSION && \\',
+  '    rm -rf /tmp/pip-cache/*',
+  'CMD [ "python" ]',
+].join('\n') + '\n';
+
+// 'pending' while prewarm is in flight, 'done' on success, 'failed' on error/timeout.
 // HAS_DOCKER=false: pre-set to 'done' so the no-docker flavor is completely unaffected and
-// /ready returns 200 immediately without waiting for a pull that would never start.
+// /ready returns 200 immediately without waiting for a prewarm that would never start.
 let prewarmState = HAS_DOCKER ? 'pending' : 'done'; // 'pending' | 'done' | 'failed'
 
-// PREWARM_DEADLINE_MS + DOCKER_READY_DEADLINE_MS must together fit within readyTimeoutInSeconds
-// configured in scripts/build-microvm-image.ts (currently 180s = 180_000ms). With dockerd capped
-// at 50s and prewarm at 120s that leaves 10s of headroom before the build hook times out.
-const PREWARM_DEADLINE_MS = 120_000;
+// PREWARM_DEADLINE_MS is applied as the timeout ceiling for each step (pull, then build).
+// Total prewarm budget is bounded by: DOCKER_READY_DEADLINE_MS (50s) + pull (~24s) + build
+// (~40s emulated arm64) ≈ 114s. PREWARM_DEADLINE_MS gives ample headroom per step.
+// DOCKER_READY_DEADLINE_MS + PREWARM_DEADLINE_MS must fit within readyTimeoutInSeconds
+// configured in scripts/build-microvm-image.ts (currently 240s = 240_000ms):
+//   50s (dockerd) + 160s (prewarm budget per step) = 210s < 240s — 30s headroom.
+const PREWARM_DEADLINE_MS = 160_000;
 
-// Pulls SAM_BASE_IMAGE into the local dockerd image cache. Called only after the daemon is ready.
-// On success: prewarmState='done'. On timeout or error: prewarmState='failed', logs prominently.
-// Failure is non-blocking — /ready still returns 200 so jobs are never stuck (best-effort).
+// Sequentially: pulls SAM_BASE_IMAGE, then builds the uv bundling image from the vendored
+// Dockerfile. Called only after dockerd is ready. Both steps run as best-effort:
+//   • Pull failure  → prewarmState='failed'; cdk synth pulls SAM fresh (~24s).
+//   • Build failure → prewarmState='failed'; cdk synth builds uv fresh (~30s).
+//   • Build success → prewarmState='done'; both layers pre-warmed in snapshot.
+// /ready returns 200 regardless — a prewarm failure never blocks jobs.
 function prewarmDockerImages() {
   const start = Date.now();
+
+  // Write vendored Dockerfile to a temp dir so `docker build` has a build context.
+  const uvDockerfileDir = fs.mkdtempSync(path.join(os.tmpdir(), 'uv-prewarm-'));
+  fs.writeFileSync(path.join(uvDockerfileDir, 'Dockerfile'), UV_BUNDLING_DOCKERFILE);
+
   console.log(`Prewarming SAM base image: ${SAM_BASE_IMAGE}`);
   execFile(
     'docker',
     ['pull', SAM_BASE_IMAGE],
     { timeout: PREWARM_DEADLINE_MS },
-    (err) => {
-      if (!err) {
-        prewarmState = 'done';
-        console.log(`SAM base image prewarm complete (${Date.now() - start}ms).`);
-      } else {
+    (pullErr) => {
+      if (pullErr) {
         prewarmState = 'failed';
         console.error(
-          `SAM base image prewarm FAILED after ${Date.now() - start}ms — cdk synth will pull fresh.`,
-          err.message,
+          `SAM base image prewarm FAILED (pull) after ${Date.now() - start}ms — cdk synth will pull fresh.`,
+          pullErr.message,
         );
+        return;
       }
+
+      // Pull succeeded — build the uv bundling image using the vendored Dockerfile.
+      // --platform linux/arm64 matches Architecture.ARM_64 that CDK uses for Lambda functions.
+      // --build-arg IMAGE uses the tag (not the digest) so Docker resolves it to the already-
+      // pulled local manifest, ensuring the same parent image ID as CDK's DockerImage.fromBuild.
+      const pullMs = Date.now() - start;
+      console.log(`SAM base image pull complete (${pullMs}ms). Building uv bundling image (uv==${UV_VERSION})...`);
+      execFile(
+        'docker',
+        [
+          'build',
+          '--platform', 'linux/arm64',
+          '--build-arg', `IMAGE=${BUNDLING_IMAGE_REF}`,
+          '--build-arg', `UV_VERSION=${UV_VERSION}`,
+          '-t', `orchestrator-uv-prewarm:${UV_VERSION}`,
+          uvDockerfileDir,
+        ],
+        { timeout: PREWARM_DEADLINE_MS },
+        (buildErr) => {
+          if (buildErr) {
+            prewarmState = 'failed';
+            console.error(
+              `uv bundling image prewarm FAILED (build) after ${Date.now() - start}ms — cdk synth will build fresh.`,
+              buildErr.message,
+            );
+          } else {
+            prewarmState = 'done';
+            console.log(`uv bundling image prewarm complete (${Date.now() - start}ms). Snapshot warmed with SAM pull + uv build.`);
+          }
+        },
+      );
     },
   );
 }
