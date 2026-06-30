@@ -32,8 +32,8 @@ const CONFIG: MicrovmLaunchConfig = {
   executionRoleArn: 'arn:role',
   ingressNetworkConnectors: ['ingress'],
   egressNetworkConnectors: ['egress'],
-  maxIdleDurationSeconds: 900,
-  suspendedDurationSeconds: 3600,
+  maxIdleDurationSeconds: 1800,
+  suspendedDurationSeconds: 10,
   maximumDurationInSeconds: 3600,
 };
 

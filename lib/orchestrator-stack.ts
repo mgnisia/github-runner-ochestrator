@@ -34,9 +34,9 @@ export class OrchestratorStack extends Stack {
       (this.node.tryGetContext('dockerRunnerLabel') as string | undefined) ?? 'docker';
 
     const microvmMaxIdleSeconds =
-      (this.node.tryGetContext('microvmMaxIdleSeconds') as string | undefined) ?? '900';
+      (this.node.tryGetContext('microvmMaxIdleSeconds') as string | undefined) ?? '1800';
     const microvmSuspendedSeconds =
-      (this.node.tryGetContext('microvmSuspendedSeconds') as string | undefined) ?? '3600';
+      (this.node.tryGetContext('microvmSuspendedSeconds') as string | undefined) ?? '10';
     const microvmMaxDurationSeconds =
       (this.node.tryGetContext('microvmMaxDurationSeconds') as string | undefined) ?? '3600';
 
