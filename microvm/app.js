@@ -23,7 +23,56 @@ const HAS_DOCKER = process.env.RUNNER_HAS_DOCKER === '1';
 // Best-effort: if the daemon never comes up we mark it 'failed' and let /ready proceed anyway, so
 // jobs that don't need Docker are not blocked.
 let dockerState = HAS_DOCKER ? 'starting' : 'ready'; // 'starting' | 'ready' | 'failed'
-const DOCKER_READY_DEADLINE_MS = 50_000; // stay within the 60s readyTimeoutInSeconds build hook
+const DOCKER_READY_DEADLINE_MS = 50_000; // stay within the readyTimeoutInSeconds build hook
+
+// ── SAM base image prewarm (snapshot-warmed) ──────────────────────────────────
+// Pulling the SAM bundling base image BEFORE /ready returns 200 ensures it lands in the MicroVM
+// snapshot layer and is already present in dockerd's image cache on every restored run. This
+// eliminates the ~24s cold pull that `cdk synth` (aws-news/backend) paid on every job.
+//
+// DIGEST PIN: The digest below must match the base image used by the `uv_python_lambda` CDK
+// bundling image in the aws-news/backend repo. Pinning by digest guarantees the pre-pull is a
+// cache hit at synth time — Docker skips the network round-trip when the manifest is already
+// local. A digest MISMATCH is benign (challenge C2): the snapshot will simply contain a
+// different layer than the synth expects, and cdk synth will pull its required digest fresh, just
+// as it did before this prewarm. Mismatches waste snapshot space but never break builds.
+// Update this constant whenever aws-news/backend bumps its SAM base image.
+const SAM_BASE_IMAGE = 'public.ecr.aws/sam/build-python3.13@sha256:caa464dc2628d5e9e87936142b571d3cbd3c5cc3a64cde9471963bfa5c54d2c8';
+
+// 'pending' while pull is in flight, 'done' on success, 'failed' on error/timeout.
+// HAS_DOCKER=false: pre-set to 'done' so the no-docker flavor is completely unaffected and
+// /ready returns 200 immediately without waiting for a pull that would never start.
+let prewarmState = HAS_DOCKER ? 'pending' : 'done'; // 'pending' | 'done' | 'failed'
+
+// PREWARM_DEADLINE_MS + DOCKER_READY_DEADLINE_MS must together fit within readyTimeoutInSeconds
+// configured in scripts/build-microvm-image.ts (currently 180s = 180_000ms). With dockerd capped
+// at 50s and prewarm at 120s that leaves 10s of headroom before the build hook times out.
+const PREWARM_DEADLINE_MS = 120_000;
+
+// Pulls SAM_BASE_IMAGE into the local dockerd image cache. Called only after the daemon is ready.
+// On success: prewarmState='done'. On timeout or error: prewarmState='failed', logs prominently.
+// Failure is non-blocking — /ready still returns 200 so jobs are never stuck (best-effort).
+function prewarmDockerImages() {
+  const start = Date.now();
+  console.log(`Prewarming SAM base image: ${SAM_BASE_IMAGE}`);
+  execFile(
+    'docker',
+    ['pull', SAM_BASE_IMAGE],
+    { timeout: PREWARM_DEADLINE_MS },
+    (err) => {
+      if (!err) {
+        prewarmState = 'done';
+        console.log(`SAM base image prewarm complete (${Date.now() - start}ms).`);
+      } else {
+        prewarmState = 'failed';
+        console.error(
+          `SAM base image prewarm FAILED after ${Date.now() - start}ms — cdk synth will pull fresh.`,
+          err.message,
+        );
+      }
+    },
+  );
+}
 
 function startDockerDaemon() {
   // Pass --dns 172.17.0.1 so every container (including nested `docker build` builds) receives
@@ -34,10 +83,14 @@ function startDockerDaemon() {
   daemon.on('error', (err) => {
     console.error('Failed to spawn dockerd:', err);
     dockerState = 'failed';
+    prewarmState = 'failed'; // can't pull without a daemon
   });
   daemon.on('exit', (code, signal) => {
     console.error(`dockerd exited — code: ${code ?? '(null)'}, signal: ${signal ?? '(null)'}`);
-    if (dockerState !== 'ready') dockerState = 'failed';
+    if (dockerState !== 'ready') {
+      dockerState = 'failed';
+      prewarmState = 'failed'; // can't pull without a daemon
+    }
   });
 
   const start = Date.now();
@@ -46,10 +99,13 @@ function startDockerDaemon() {
       if (!err) {
         dockerState = 'ready';
         console.log('Docker daemon is ready.');
+        // Kick off image prewarm now that dockerd is up — must run after daemon ready, not before.
+        prewarmDockerImages();
         return;
       }
       if (Date.now() - start > DOCKER_READY_DEADLINE_MS) {
         dockerState = 'failed';
+        prewarmState = 'failed'; // daemon never came up; no pull possible
         console.error('Docker daemon did not become ready in time — proceeding without it. Jobs that require Docker may fail.');
         return;
       }
@@ -153,12 +209,13 @@ async function handleRequest(req, res) {
   console.log(`${new Date().toISOString()} ${method} ${url}`);
 
   // POST /aws/lambda-microvms/runtime/v1/ready
-  // Required during image creation so Lambda knows the server is up. We additionally gate the
-  // snapshot on the Docker daemon being ready, so it is captured warm: return 503 while it is
-  // still starting (Lambda retries until readyTimeoutInSeconds), then 200 once it is ready or has
-  // failed (best-effort — a docker failure should not block non-docker jobs).
+  // Required during image creation so Lambda knows the server is up. We gate the snapshot on BOTH
+  // the Docker daemon being ready AND the SAM base image prewarm completing, so both are captured
+  // warm in the MicroVM snapshot: return 503 while either is still in progress (Lambda retries
+  // until readyTimeoutInSeconds), then 200 once both are settled (ready or failed).
+  // Best-effort: a docker/prewarm failure still returns 200 so non-docker jobs are never blocked.
   if (method === 'POST' && url === '/aws/lambda-microvms/runtime/v1/ready') {
-    if (dockerState === 'starting') {
+    if (dockerState === 'starting' || prewarmState === 'pending') {
       res.writeHead(503);
       res.end();
       return;
