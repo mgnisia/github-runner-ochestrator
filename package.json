@@ -5,26 +5,26 @@
   "scripts": {
     "build": "tsc --noEmit",
     "test": "jest",
-    "synth": "cdk synth",
-    "deploy": "cdk deploy --outputs-file output.json",
+    "build:lambdas": "ts-node scripts/build-lambdas.ts",
+    "tofu": "ts-node scripts/tofu.ts",
+    "init": "ts-node scripts/tofu.ts init",
+    "synth": "bun run build:lambdas && ts-node scripts/tofu.ts plan",
+    "deploy": "bun run build:lambdas && ts-node scripts/tofu.ts apply",
     "build:image:docker": "ts-node scripts/build-microvm-image.ts docker",
     "build:image:no-docker": "ts-node scripts/build-microvm-image.ts no-docker",
-    "build:images": "npm run build:image:docker && npm run build:image:no-docker"
+    "build:images": "bun run build:image:docker && bun run build:image:no-docker"
   },
   "dependencies": {
     "@aws-sdk/client-lambda-microvms": "^3.1075.0",
     "@aws-sdk/client-s3": "^3.1075.0",
     "@aws-sdk/client-sqs": "^3.1075.0",
     "@aws-sdk/client-ssm": ">=3.1074.0",
-    "aws-cdk-lib": "^2",
-    "constructs": "^10",
     "dotenv": "^16"
   },
   "devDependencies": {
     "@types/aws-lambda": "^8",
     "@types/jest": "^29",
     "@types/node": "^22",
-    "aws-cdk": "^2",
     "esbuild": "^0.24",
     "jest": "^29",
     "ts-jest": "^29",

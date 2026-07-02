@@ -1,0 +1,38 @@
+# mise-en-place tool + env manager. Run `mise install` to provision the pinned
+# toolchain, then `mise run <task>` (or the package.json scripts via bun).
+[tools]
+node = "22"
+bun = "latest"
+opentofu = "1.12.3"
+
+[env]
+# Auto-load the gitignored .env (TF_STATE_BUCKET, RUNNER_GROUP_ID, image ARNs).
+_.file = ".env"
+
+[tasks.install]
+description = "Install JS dependencies with bun"
+run = "bun install"
+
+[tasks.build]
+description = "Type-check (tsc --noEmit)"
+run = "bun run build"
+
+[tasks.test]
+description = "Run jest unit tests"
+run = "bun run test"
+
+[tasks.init]
+description = "tofu init (S3 backend bucket from .env)"
+run = "bun run init"
+
+[tasks.synth]
+description = "Bundle Lambdas + tofu plan"
+run = "bun run synth"
+
+[tasks.deploy]
+description = "Bundle Lambdas + tofu apply"
+run = "bun run deploy"
+
+[tasks.build-images]
+description = "Build both MicroVM images"
+run = "bun run build:images"

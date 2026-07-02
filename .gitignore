@@ -3,17 +3,24 @@
 !microvm/*.js
 *.d.ts
 node_modules
-# CDK asset staging / output
-.cdk.staging
-cdk.out
+
+# Lambda build output (bundled by scripts/build-lambdas.ts)
+dist/
+
+# OpenTofu
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
 
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db
 .beads-credential-key
 
-# Local environment and CDK output files
-output.json
+# Local environment files
 .env
 
 # Serena MCP server (local cache and memories)

@@ -6,11 +6,12 @@
  * image versions, and writes the ARN to .env.
  *
  * Run via:
- *   npm run build:image:docker      (github-runner-docker)
- *   npm run build:image:no-docker   (github-runner-no-docker)
- *   npm run build:images            (both, sequentially)
+ *   bun run build:image:docker      (github-runner-docker)
+ *   bun run build:image:no-docker   (github-runner-no-docker)
+ *   bun run build:images            (both, sequentially)
  *
- * Prerequisites: npm run deploy (produces output.json with stack outputs)
+ * Prerequisites: `bun run deploy` (Phase A `tofu apply` creating the code
+ * bucket + build role, whose values are read here via `tofu output -json`).
  */
 
 import * as fs from 'fs';
@@ -32,7 +33,7 @@ import {
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const STACK_NAME = 'GithubRunnerOrchestratorStack';
+const TOFU_DIR = path.join(__dirname, '..', 'tofu');
 const POLL_INTERVAL_MS = 15_000;
 const POLL_TIMEOUT_MS = 12 * 60 * 1000; // 12 minutes
 
@@ -130,44 +131,53 @@ async function readOutputs(): Promise<{
   MicrovmBaseImageArn: string;
   Region: string;
 }> {
-  const outputPath = path.join(__dirname, '..', 'output.json');
-  if (!fs.existsSync(outputPath)) {
+  // Read OpenTofu state outputs directly. `tofu output -json` emits
+  // { "<name>": { "value": <v>, "sensitive": bool, "type": ... }, ... }.
+  const result = spawnSync('tofu', ['output', '-json'], {
+    cwd: TOFU_DIR,
+    encoding: 'utf8',
+  });
+
+  if (result.error) {
     throw new Error(
-      `output.json not found at ${outputPath}. Please run \`npm run deploy\` first to generate stack outputs.`
+      `Failed to run \`tofu output -json\` in ${TOFU_DIR}: ${result.error.message}. Is OpenTofu installed and initialized?`
+    );
+  }
+  if (result.status !== 0) {
+    throw new Error(
+      `\`tofu output -json\` exited with status ${result.status}. Have you run \`bun run deploy\` (Phase A apply) yet?\n${result.stderr ?? ''}`
     );
   }
 
-  let raw: Record<string, Record<string, string>>;
+  let raw: Record<string, { value: unknown }>;
   try {
-    raw = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
+    raw = JSON.parse(result.stdout);
   } catch {
-    throw new Error(
-      `Failed to parse output.json. Please run \`npm run deploy\` first to regenerate stack outputs.`
-    );
+    throw new Error('Failed to parse `tofu output -json` stdout as JSON.');
   }
 
-  const stackOutputs = raw[STACK_NAME];
-  if (!stackOutputs) {
-    throw new Error(
-      `output.json does not contain key "${STACK_NAME}". Please run \`npm run deploy\` first.`
-    );
-  }
+  const outputKeys = {
+    MicrovmCodeBucketName: 'microvm_code_bucket_name',
+    MicrovmBuildRoleArn: 'microvm_build_role_arn',
+    MicrovmBaseImageArn: 'microvm_base_image_arn',
+    Region: 'region',
+  } as const;
 
-  const required = ['MicrovmCodeBucketName', 'MicrovmBuildRoleArn', 'MicrovmBaseImageArn', 'Region'] as const;
-  for (const key of required) {
-    if (!stackOutputs[key]) {
+  const values: Record<keyof typeof outputKeys, string> = {} as never;
+  for (const [alias, tfName] of Object.entries(outputKeys) as [
+    keyof typeof outputKeys,
+    string
+  ][]) {
+    const value = raw[tfName]?.value;
+    if (typeof value !== 'string' || value === '') {
       throw new Error(
-        `Missing output "${key}" under "${STACK_NAME}" in output.json. Please run \`npm run deploy\` first.`
+        `Missing OpenTofu output "${tfName}". Please run \`bun run deploy\` first to apply Phase A.`
       );
     }
+    values[alias] = value;
   }
 
-  return {
-    MicrovmCodeBucketName: stackOutputs['MicrovmCodeBucketName'],
-    MicrovmBuildRoleArn: stackOutputs['MicrovmBuildRoleArn'],
-    MicrovmBaseImageArn: stackOutputs['MicrovmBaseImageArn'],
-    Region: stackOutputs['Region'],
-  };
+  return values;
 }
 
 function zipMicrovm(dockerfile: string): string {
@@ -380,7 +390,7 @@ function writeEnvFile(envKey: string, imageArn: string): void {
   const updated = upsertEnvArn(existing, envKey, imageArn);
   fs.writeFileSync(envPath, updated, 'utf8');
   console.log(`\n${envKey}=${imageArn}`);
-  console.log('Image ready. Now run `npm run deploy` to deploy the orchestrator.');
+  console.log('Image ready. Now run `bun run deploy` to deploy the orchestrator.');
 }
 
 async function main(): Promise<void> {
@@ -397,8 +407,8 @@ async function main(): Promise<void> {
 
   console.log(`=== build-microvm-image [${flavorArg}] ===`);
 
-  // Step 1: read CDK outputs
-  console.log('Reading CDK outputs from output.json ...');
+  // Step 1: read OpenTofu outputs
+  console.log('Reading OpenTofu outputs via `tofu output -json` ...');
   const { MicrovmCodeBucketName, MicrovmBuildRoleArn, MicrovmBaseImageArn, Region } =
     await readOutputs();
   console.log(`  Region:              ${Region}`);
