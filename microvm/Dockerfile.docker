@@ -4,8 +4,26 @@ ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-      ca-certificates curl gnupg tar gzip net-tools git jq dnsmasq unzip && \
+      ca-certificates curl gnupg tar gzip net-tools git jq dnsmasq unzip \
+      build-essential pkg-config && \
     rm -rf /var/lib/apt/lists/*
+
+# ── Pre-baked toolchain (mirrors club-coaster-app/app mise.toml [tools]) ─────
+# Compile/download the app's mise toolchain at image-build time so ephemeral
+# runners reuse the cache instead of rebuilding cargo-lambda / cargo-zigbuild on
+# every job. Installed as root (jobs run as root, RUNNER_ALLOW_RUNASROOT=1) into
+# the shared mise data dir; the repo's own `mise install` then resolves to these
+# already-built tools. Update these pins when the app's mise.toml changes.
+ENV MISE_DATA_DIR=/root/.local/share/mise
+ENV MISE_YES=1
+RUN curl -fsSL https://mise.run | sh && \
+    ln -sf /root/.local/bin/mise /usr/local/bin/mise && \
+    mise use -g \
+      node@lts bun@latest \
+      "github:getsops/sops@latest" \
+      rust@stable zig@0.14.0 \
+      "cargo:cargo-lambda@1.6.1" "cargo:cargo-zigbuild@0.23.0" && \
+    rm -rf /root/.cargo/registry /root/.cargo/git /var/lib/apt/lists/*
 
 # Node.js 22 (NodeSource — Ubuntu's repos only ship Node 18)
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
