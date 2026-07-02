@@ -52,15 +52,19 @@ bd close <id>         # Complete work
 
 ## Build & Test
 
+Tooling is pinned with **mise** (`mise install`) and JS deps use **bun**. Infra is **OpenTofu** in `tofu/` (see README for the two-phase deploy).
+
 ```bash
-npm install        # install dependencies
-npm run build      # type-check (tsc --noEmit)
-npm test           # run jest unit tests
-npm run synth      # cdk synth
-npm run deploy     # cdk deploy --outputs-file output.json (infra first; orchestrator once MICROVM_IMAGE_ARN is set)
-npm run build:image:docker     # build github-runner-docker image, write MICROVM_IMAGE_ARN_DOCKER to .env
-npm run build:image:no-docker  # build github-runner-no-docker image, write MICROVM_IMAGE_ARN_NO_DOCKER to .env
-npm run build:images           # build both images sequentially (required before npm run deploy)
+mise install       # provision Node 22, bun, opentofu (versions in mise.toml)
+bun install        # install JS dependencies
+bun run build      # type-check (tsc --noEmit)
+bun test           # run jest unit tests
+bun run init       # tofu init — S3 backend bucket read from .env (TF_STATE_BUCKET)
+bun run synth      # bundle Lambdas + tofu plan (dry run)
+bun run deploy     # bundle Lambdas + tofu apply (Phase A infra; Phase B once both MICROVM_IMAGE_ARN_* are set in .env)
+bun run build:image:docker     # build github-runner-docker image, write MICROVM_IMAGE_ARN_DOCKER to .env
+bun run build:image:no-docker  # build github-runner-no-docker image, write MICROVM_IMAGE_ARN_NO_DOCKER to .env
+bun run build:images           # build both images sequentially (required before Phase B deploy)
 ```
 
 ## Architecture Overview
