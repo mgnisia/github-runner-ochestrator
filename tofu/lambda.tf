@@ -63,13 +63,16 @@ resource "aws_sqs_queue" "webhook_dlq" {
 }
 
 resource "aws_sqs_queue" "webhook" {
-  count                      = local.phase_b ? 1 : 0
-  name_prefix                = "github-runner-webhook-"
-  visibility_timeout_seconds = 30
+  count       = local.phase_b ? 1 : 0
+  name_prefix = "github-runner-webhook-"
+  # 60s (> worker timeout 25s) so a launch retries ~once a minute; with
+  # maxReceiveCount=10 that's ~10 min of retries — long enough to ride out the
+  # transient 8GB overlap while a prior job's MicroVM finishes terminating.
+  visibility_timeout_seconds = 60
 
   redrive_policy = jsonencode({
     deadLetterTargetArn = aws_sqs_queue.webhook_dlq[0].arn
-    maxReceiveCount     = 3
+    maxReceiveCount     = 10
   })
 }
 

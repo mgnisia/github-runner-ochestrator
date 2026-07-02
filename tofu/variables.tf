@@ -35,7 +35,7 @@ variable "docker_runner_label" {
 }
 
 variable "microvm_max_idle_seconds" {
-  description = "MicroVM max idle seconds before teardown."
+  description = "MicroVM max idle seconds before teardown. WARNING: the idle timer is NOT reset by GitHub job activity, so this acts as a hard cap on job duration — keep it well above the longest expected job (must exceed ~12min unit-test runs). Do NOT lower to 'free orphaned runners faster'; that kills active jobs mid-run."
   type        = string
   default     = "1800"
 }
