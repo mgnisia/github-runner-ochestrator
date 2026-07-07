@@ -274,7 +274,7 @@ async function createOrUpdate(
       ? { additionalOsCapabilities: flavor.capabilities }
       : {}),
     resources: [{
-      minimumMemoryInMiB: 4096,
+      minimumMemoryInMiB: 2048,
     }],
     hooks: {
       port: 9000,
