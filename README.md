@@ -243,7 +243,7 @@ The script takes a flavor argument (`docker` or `no-docker`) and drives image cr
 
 1. Reads Phase A outputs via `tofu output -json` (code bucket name, build role ARN, base image ARN, region).
 2. Stages the flavor's Dockerfile as `Dockerfile`, zips it with `app.js`, `entrypoint.sh`, `package.json` into `app.zip`, and uploads it to the code bucket.
-3. Calls `CreateMicrovmImage` (or `UpdateMicrovmImage` if the image exists) with the image name, `minimumMemoryInMiB: 4096`, port-9000 lifecycle hooks (ready 180 s, run 30 s, terminate 30 s), and — for the docker flavor only — `additionalOsCapabilities: ["ALL"]`.
+3. Calls `CreateMicrovmImage` (or `UpdateMicrovmImage` if the image exists) with the image name, `minimumMemoryInMiB: 8192 (4 vCPUs)`, port-9000 lifecycle hooks (ready 180 s, run 30 s, terminate 30 s), and — for the docker flavor only — `additionalOsCapabilities: ["ALL"]`.
 4. Polls until the image reaches `CREATED`/`UPDATED`.
 5. Deletes superseded image versions, keeping only the one just built.
 6. Writes the flavor's `MICROVM_IMAGE_ARN_*` key into `.env`.

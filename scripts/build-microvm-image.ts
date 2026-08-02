@@ -35,7 +35,7 @@ import {
 
 const TOFU_DIR = path.join(__dirname, '..', 'tofu');
 const POLL_INTERVAL_MS = 15_000;
-const POLL_TIMEOUT_MS = 12 * 60 * 1000; // 12 minutes
+const POLL_TIMEOUT_MS = 25 * 60 * 1000; // 25 minutes (pre-baked toolchain compiles cargo tools)
 
 // ── Flavor configuration ─────────────────────────────────────────────────────
 
@@ -274,7 +274,7 @@ async function createOrUpdate(
       ? { additionalOsCapabilities: flavor.capabilities }
       : {}),
     resources: [{
-      minimumMemoryInMiB: 4096,
+      minimumMemoryInMiB: 8192,
     }],
     hooks: {
       port: 9000,
@@ -374,14 +374,25 @@ async function deleteOldImageVersions(
 
   const toDelete = selectVersionsToDelete(allVersions, keepVersion);
 
+  // Best-effort: a version can transiently refuse deletion (e.g. still
+  // referenced by a just-superseded build). The image is already UPDATED at
+  // this point, so a cleanup failure must NOT fail the whole build.
+  let deleted = 0;
   for (const imageVersion of toDelete) {
     console.log(`  Deleting old image version: ${imageVersion}`);
-    await microvmsClient.send(
-      new DeleteMicrovmImageVersionCommand({ imageIdentifier, imageVersion })
-    );
+    try {
+      await microvmsClient.send(
+        new DeleteMicrovmImageVersionCommand({ imageIdentifier, imageVersion })
+      );
+      deleted++;
+    } catch (err) {
+      console.warn(
+        `  Warning: could not delete image version ${imageVersion} (${err instanceof Error ? err.name : 'error'}); leaving it in place.`
+      );
+    }
   }
 
-  console.log(`Deleted ${toDelete.length} old image version(s).`);
+  console.log(`Deleted ${deleted}/${toDelete.length} old image version(s).`);
 }
 
 function writeEnvFile(envKey: string, imageArn: string): void {
