@@ -4,7 +4,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-      ca-certificates curl gnupg tar gzip net-tools git jq unzip \
+      ca-certificates curl gnupg tar gzip net-tools git git-lfs jq unzip \
       build-essential pkg-config && \
     rm -rf /var/lib/apt/lists/*
 
